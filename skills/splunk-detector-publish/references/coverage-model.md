@@ -52,9 +52,9 @@ No live Standard detector matches on both metric name AND service filter.
 **Action:** create via `POST /v2/detector` (Splunk REST API). Only the confirmed
 gaps are created; existing detectors are never modified. See
 `../../references/splunk-api.md` for the request shape. The create step is
-idempotent by construction — the diff runs against the live detector set fetched
-that same run, and a 409 Conflict from a concurrently-created detector is treated
-as already-covered rather than an error (see Idempotency below).
+idempotent by construction: the diff runs against a complete live detector set
+fetched that same run, and a 409 Conflict triggers the structural
+reclassification described under Idempotency.
 
 ### UNCERTAIN
 At least one live Standard detector references the same metric name, but the
@@ -92,17 +92,20 @@ O11y REST API does not offer one. Idempotency is achieved locally:
 1. **Diff before create.** Every local spec is classified against the live
    detector set fetched at the start of the run. Only specs classified as GAP are
    sent to `POST /v2/detector`; COVERED and UNCERTAIN specs are never created.
-2. **409 Conflict tolerance.** If a detector with the same name/scope was created
-   concurrently (another run, another user) between the diff and the create, the
-   API returns HTTP 409. Treat that 409 as "already covered" — record it in the
-   ledger as COVERED-on-conflict rather than surfacing it as a failure.
+2. **409 Conflict reclassification.** If another writer creates a same-named
+   detector between diff and create, refresh the complete detector inventory and
+   candidate details, then rerun this reference's full metric + resolved service
+   filter + Standard-origin matching rule. Reuse its ID and record
+   COVERED-on-conflict only when every criterion matches. A partial, ambiguous,
+   or divergent candidate is UNCERTAIN; never reuse by name alone or retry the
+   unchanged POST.
 3. **Resumable ledger.** `.observe/detector-sync.md` records each spec's verdict
    and create result, so a re-run skips already-created detectors and only
    retries genuine failures.
 
-This diff + 409 approach gives the same "create only the confirmed gaps" behavior
-that a hypothetical `if_not_exists` flag would, without depending on an API
-feature that does not exist.
+This diff + structural 409 reclassification gives the same "create only the
+confirmed gaps" behavior that a hypothetical `if_not_exists` flag would,
+without depending on an API feature that does not exist.
 
 ## Worked Examples
 

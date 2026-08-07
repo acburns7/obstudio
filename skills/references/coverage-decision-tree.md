@@ -56,6 +56,22 @@ re-derive the verdict without re-running the tool:
 A never-empty Reason per verdict is a hard requirement; a deterministic eval
 asserts it.
 
+## Pagination and race gates
+
+Apply these gates before the object-specific rules:
+
+- A list result is complete only when every required page and detail fetch
+  succeeds. If any page is skipped or fails, override every local verdict to
+  UNCERTAIN and send no write request. Partial diagnostic results cannot prove
+  presence or absence.
+- An HTTP 409/name conflict is new live evidence, not automatic coverage.
+  Refetch the candidate and rerun every object-specific structural criterion.
+  Reuse its ID only when the fresh verdict is COVERED. A partial, ambiguous, or
+  divergent candidate is UNCERTAIN and blocks dependent writes.
+- If the race changes the mutation shape, such as dashboard POST becoming PUT,
+  stop and build a new plan. Prior confirmation does not authorize the changed
+  action.
+
 ## Multi-level objects
 
 A simple object (a detector) has one verdict. A composite object (a dashboard)

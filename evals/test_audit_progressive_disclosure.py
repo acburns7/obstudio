@@ -1,13 +1,66 @@
+import json
+import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = ROOT / "skills" / "otel-audit" / "SKILL.md"
 REPORT_FLOW = ROOT / "skills" / "references" / "report-flow-contract.md"
+SCHEMA_V2 = ROOT / "skills" / "otel-audit" / "references" / "schema-v2-contract.md"
 
 
 def normalized(path: Path) -> str:
     return " ".join(path.read_text(encoding="utf-8").split())
+
+
+def test_audit_routes_to_the_schema_v2_authoring_contract() -> None:
+    skill = normalized(SKILL)
+    assert "references/schema-v2-contract.md" in skill
+    assert "Before authoring .observe/otel-audit.json" in skill.replace("`", "")
+    assert SCHEMA_V2.is_file()
+
+
+def test_schema_v2_reference_keeps_machine_authoring_deterministic() -> None:
+    source = SCHEMA_V2.read_text(encoding="utf-8")
+    contract = " ".join(source.split())
+    match = re.search(r"```json\n(.*?)\n```", source, re.DOTALL)
+    assert match, "schema-v2 reference must include a parseable canonical example"
+    example = json.loads(match.group(1))
+
+    assert example["schema_version"] == 2
+    assert example["kind"] == "otel-audit"
+    assert set(example) >= {
+        "meta",
+        "signal_flow",
+        "current_instrumentation",
+        "findings",
+        "verification",
+    }
+    finding = example["findings"][0]
+    assert set(finding) >= {
+        "id",
+        "area",
+        "priority",
+        "required_fix",
+        "instrument_mode",
+        "verification_scenarios",
+        "dependencies",
+        "expected_telemetry",
+    }
+    assert example["verification"]["environments"]
+    assert example["verification"]["scenarios"]
+
+    for term in (
+        "signal_flow.component_flow_map",
+        "Every finding contains all of these fields",
+        "Keep dependencies acyclic",
+        "requested_ids",
+        "approved_ids",
+        "decision_answers",
+        "Every scenario environment ID must exist",
+        "Every finding verification_scenarios ID must exist",
+    ):
+        assert term.replace("`", "") in contract.replace("`", "")
 
 
 def test_audit_renderer_owns_the_canonical_reader_projection() -> None:

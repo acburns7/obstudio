@@ -27,10 +27,15 @@ other sensitive payloads in saved evidence. Trace IDs may be recorded as
 technical proof but must not become metric dimensions.
 
 When the explorer also runs semantic-convention validation, preserve the raw
-summary and classify findings as actionable, registry mismatch, or stale.
-Moved GenAI/MCP registry entries, custom app-owned signals absent from the core
-registry, and framework-owned `asgi.event.type` findings do not by themselves
-prove application telemetry is invalid.
+summary and classify findings as actionable, registry mismatch, library-owned
+compatibility, or stale. Moved GenAI/MCP registry entries, custom app-owned
+signals absent from the core registry, and framework-owned `asgi.event.type`
+findings do not by themselves prove application telemetry is invalid. For a
+library-owned compatibility finding, record the official package and version
+plus every affected signal. For example, an official auto-instrumentation
+library may omit `server.port` for the default HTTPS port even when a validator
+expects it; do not fail or rewrite unrelated application telemetry solely to
+silence that mismatch.
 
 ## Visibility States
 
