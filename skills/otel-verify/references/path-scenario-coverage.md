@@ -28,14 +28,17 @@ present:
   source entrypoints, expected signals, proof levels, acceptance criteria, and
   environment references as the initial inventory, then reconcile them with
   source.
-- `.observe/otel-instrumentation.md` `Verification Handoff / Results` and
-  `Signals Changed`: add every changed-signal scenario and preserve the
-  implementation gate evidence.
+- Bound `.observe/otel-instrumentation.json`
+  `findings[].telemetry_changes[].verification_scenarios`: use the exact item
+  and scenario IDs as the authoritative changed-signal inventory and preserve
+  the implementation evidence from the same bound finding. The instrumentation
+  Markdown may clarify reader detail but cannot add scenarios or telemetry
+  items.
 - `current_instrumentation`: existing spans/metrics/logs that the changed
   instrumentation depends on.
 - `genai_readiness`: workflow, agent, LLM, tool, retrieval, memory, eval,
   streaming, token usage, parentage, and duplicate-span requirements.
-- `findings[].expected_telemetry` and `.observe/otel-instrumentation.json`
+- `findings[].expected_telemetry` and the bound instrumentation JSON
   `findings[].telemetry_changes`: missing, weak, or removed-signal scenarios
   that should remain `Not run`, `Source only`, or `Blocked` until verified.
 - Source files referenced by the audit: inspect branch points, decorators,

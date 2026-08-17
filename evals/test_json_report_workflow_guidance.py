@@ -8,8 +8,21 @@ ROOT = Path(__file__).resolve().parents[1]
 AUDIT_SKILL = ROOT / "skills" / "otel-audit" / "SKILL.md"
 INSTRUMENT_SKILL = ROOT / "skills" / "otel-instrument" / "SKILL.md"
 VERIFY_SKILL = ROOT / "skills" / "otel-verify" / "SKILL.md"
+CONFIGURE_SKILL = ROOT / "skills" / "splunk-configure" / "SKILL.md"
+CONFIGURE_INPUT = (
+    ROOT / "skills" / "splunk-configure" / "references" / "input-and-validation-contract.md"
+)
 INSTRUMENT_HANDOFF = ROOT / "skills" / "otel-instrument" / "references" / "json-approval-handoff.md"
 VERIFY_HANDOFF = ROOT / "skills" / "otel-verify" / "references" / "json-approval-handoff.md"
+VERIFY_PATH_COVERAGE = (
+    ROOT / "skills" / "otel-verify" / "references" / "path-scenario-coverage.md"
+)
+VERIFY_RUNTIME_RESOLUTION = (
+    ROOT / "skills" / "otel-verify" / "references" / "project-runtime-resolution.md"
+)
+VERIFY_EXPLORER_WITNESS = (
+    ROOT / "skills" / "otel-verify" / "references" / "explorer-witness.md"
+)
 AUDIT_INPUT = ROOT / "evals" / "go" / "chi-basic" / "eval" / "inputs" / "otel-audit.json"
 REPORT_TOOL = ROOT / "skills" / "references" / "scripts" / "observe_report.py"
 REPORT_FLOW = ROOT / "skills" / "references" / "report-flow-contract.md"
@@ -46,10 +59,14 @@ def _eval_contract(path: Path) -> str:
 
 
 def _resolved_contract(skill: Path, *reference_names: str) -> str:
-    parts = [_read(skill)]
+    parts = [_read(skill), _read(REPORT_FLOW)]
+    if skill == INSTRUMENT_SKILL:
+        parts.append(_read(INSTRUMENT_HANDOFF))
+    elif skill == VERIFY_SKILL:
+        parts.append(_read(VERIFY_HANDOFF))
     for reference_name in reference_names:
         reference = skill.parent / "references" / reference_name
-        if reference.is_file():
+        if reference.is_file() and reference not in (INSTRUMENT_HANDOFF, VERIFY_HANDOFF):
             parts.append(_read(reference))
     return "\n".join(parts)
 
@@ -67,7 +84,46 @@ def test_reader_report_contracts_are_available() -> None:
     )
 
     assert "#### Reader Order" in instrument
-    assert "## Reader Report" in verify
+    assert "## Verification Report Contract" in verify
+
+
+def test_configure_shared_contract_uses_canonical_proof_and_conditional_outputs() -> None:
+    flow = " ".join(_read(REPORT_FLOW).split())
+
+    for term in (
+        "bound `.observe/otel-selection.json`, `.observe/otel-instrumentation.json`, and `.observe/otel-verify.json`",
+        "authoritative implementation and emitted-proof state",
+        "reader projections only",
+        "never authorize Terraform by themselves",
+        "only when at least one Terraform resource is generated",
+        "only when accepted evidence supports at least one detector",
+        "only when accepted evidence supports at least one dashboard resource",
+        "prerequisites-only run remains `Blocked`",
+        "A clean no-resource audit stops before artifact generation",
+    ):
+        assert term in flow
+
+
+def test_configure_validator_modes_keep_json_authoritative() -> None:
+    configure = " ".join(
+        (_read(CONFIGURE_SKILL) + _read(CONFIGURE_INPUT)).split()
+    )
+
+    for term in (
+        "--audit-json .observe/otel-audit.json",
+        "--selection-json .observe/otel-selection.json",
+        "--instrumentation-json .observe/otel-instrumentation.json",
+        "--verify-json .observe/otel-verify.json",
+        "Canonical JSON authorizes metrics; Markdown remains reader-facing",
+        "A partially supplied overlay flow is invalid",
+        "--allow-source-only-metric",
+        "--dashboard-only",
+        "--dashboards-report .observe/dashboards.md",
+        "--prerequisites-only",
+        "if any exists, supply the complete trio",
+        "generate no Terraform artifacts",
+    ):
+        assert term in configure
 
 
 def test_json_first_artifact_and_selection_contract_is_explicit() -> None:
@@ -125,7 +181,9 @@ def test_json_first_artifact_and_selection_contract_is_explicit() -> None:
 def test_human_html_usage_flow_is_documented() -> None:
     flow = " ".join(_read(REPORT_FLOW).split())
     audit = " ".join(_read(AUDIT_SKILL).split())
-    instrument = " ".join(_read(INSTRUMENT_SKILL).split())
+    instrument = " ".join(
+        _resolved_contract(INSTRUMENT_SKILL, "json-approval-handoff.md").split()
+    )
 
     for term in (
         "Human HTML Usage Flow",
@@ -185,22 +243,17 @@ def test_verify_keeps_interactive_contract() -> None:
         "verification-report.md",
     )
     handoff = _read(VERIFY_HANDOFF)
-    opening = verify.split("## Contract", 1)[0]
-    canonical_gate = verify.split("#### Canonical Scope Gate", 1)[1].split(
-        "### 2.", 1
+    opening = verify.split("## Scope And Safety Gate", 1)[0]
+    canonical_gate = verify.split("## Scope And Safety Gate", 1)[1].split(
+        "## Build The Proof Plan", 1
     )[0]
 
-    assert (
-        "Before writing verification artifacts, read "
-        "`../references/report-flow-contract.md`"
-        in " ".join(opening.split())
-    )
+    assert "../references/report-flow-contract.md" in opening
     assert "`./references/json-approval-handoff.md`" in opening
-    assert "read and follow `./references/json-approval-handoff.md`" in " ".join(
-        canonical_gate.split()
-    )
-    assert "## Reader Report" in resolved
-    assert "### 9. Final Response" in resolved
+    assert "./references/json-approval-handoff.md" in canonical_gate
+    assert "validate" in canonical_gate.lower()
+    assert "## Verification Report Contract" in resolved
+    assert "## Final Response" in resolved
 
 
 def test_verify_interactive_reference_is_resolvable() -> None:
@@ -208,7 +261,7 @@ def test_verify_interactive_reference_is_resolvable() -> None:
     resolved = _resolved_contract(VERIFY_SKILL, "verification-report.md")
     assert "./references/json-approval-handoff.md" in verify
     assert VERIFY_HANDOFF.is_file()
-    assert "## Reader Report" in resolved
+    assert "## Verification Report Contract" in resolved
     assert "## Verification JSON" not in verify
     assert "## Verification JSON" in _read(VERIFY_HANDOFF)
 
@@ -235,7 +288,9 @@ def test_downstream_html_reports_use_browser_safe_loopback_links() -> None:
 def test_instrument_keeps_verification_results_in_bound_overlay() -> None:
     definition = json.loads(_read(INSTRUMENT_EVAL))
     rubric = " ".join(definition["rubric"])
-    instrument = " ".join(_read(INSTRUMENT_SKILL).split())
+    instrument = " ".join(
+        _resolved_contract(INSTRUMENT_SKILL, "json-approval-handoff.md").split()
+    )
     handoff = " ".join(_read(INSTRUMENT_HANDOFF).split())
 
     assert "separately bound .observe/otel-verify.json carries verification results" in rubric
@@ -257,7 +312,9 @@ def test_instrumentation_meta_result_never_uses_not_run() -> None:
 def test_manual_decision_answers_are_separate_and_gate_matching_work() -> None:
     audit = " ".join(_read(AUDIT_SKILL).split())
     flow = " ".join(_read(REPORT_FLOW).split())
-    instrument = " ".join(_read(INSTRUMENT_SKILL).split())
+    instrument = " ".join(
+        _resolved_contract(INSTRUMENT_SKILL, "json-approval-handoff.md").split()
+    )
     handoff = " ".join(_read(INSTRUMENT_HANDOFF).split())
 
     for text in (audit, flow):
@@ -387,6 +444,43 @@ def test_canonical_overlays_join_code_telemetry_product_action_and_item_proof() 
         "explorer_visible",
     ):
         assert term in verify
+
+
+def test_verify_references_keep_json_authoritative_for_scenarios_and_runtime() -> None:
+    path_contract = " ".join(_read(VERIFY_PATH_COVERAGE).split())
+    runtime_contract = " ".join(_read(VERIFY_RUNTIME_RESOLUTION).split())
+
+    for term in (
+        "Bound `.observe/otel-instrumentation.json`",
+        "authoritative changed-signal inventory",
+        "Markdown may clarify reader detail but cannot add scenarios or telemetry items",
+    ):
+        assert term in path_contract
+    for term in (
+        "bound `.observe/otel-instrumentation.json` contains tests and evidence",
+        "Markdown may clarify the reader-facing handoff but cannot introduce a runtime candidate",
+    ):
+        assert term in runtime_contract
+
+
+def test_verify_preserves_static_integrity_gate() -> None:
+    verify = " ".join(_read(VERIFY_SKILL).split())
+
+    assert "static integrity checks for changed scripts/config" in verify
+    assert "`git diff --check` when Git is available" in verify
+    assert "narrowest build/import viability gate" in verify
+
+
+def test_verify_preserves_library_owned_semantic_validation_classification() -> None:
+    explorer = " ".join(_read(VERIFY_EXPLORER_WITNESS).split())
+
+    for term in (
+        "library-owned compatibility",
+        "official package and version plus every affected signal",
+        "omit `server.port` for the default HTTPS port",
+        "do not fail or rewrite unrelated application telemetry solely",
+    ):
+        assert term in explorer
 
 
 def test_human_html_uses_generated_trace_without_raw_correlation_ids() -> None:

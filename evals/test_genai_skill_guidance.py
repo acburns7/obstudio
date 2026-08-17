@@ -7,6 +7,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO_ROOT / "skills"
 GENAI_REF = SKILLS_DIR / "references" / "genai-readiness.md"
 REPORT_FLOW = SKILLS_DIR / "references" / "report-flow-contract.md"
+OTEL_AUDIT = SKILLS_DIR / "otel-audit" / "SKILL.md"
+OTEL_INSTRUMENT = SKILLS_DIR / "otel-instrument" / "SKILL.md"
+INSTRUMENT_READINESS = (
+    SKILLS_DIR / "otel-instrument" / "references" / "readiness-implementation.md"
+)
 OTEL_VERIFY = SKILLS_DIR / "otel-verify" / "SKILL.md"
 SPLUNK_CONFIGURE = SKILLS_DIR / "splunk-configure" / "SKILL.md"
 SPLUNK_CONFIGURE_REFS = SKILLS_DIR / "splunk-configure" / "references"
@@ -18,9 +23,56 @@ SPLUNK_DETECTOR_PUBLISH = SKILLS_DIR / "splunk-detector-publish" / "SKILL.md"
 SPLUNK_DETECTOR_PUBLISH_REFS = SKILLS_DIR / "splunk-detector-publish" / "references"
 
 
-def _read(path: Path) -> str:
+def _read_raw(path: Path) -> str:
     assert path.exists(), f"Expected file not found: {path}"
     return path.read_text()
+
+
+def _read(path: Path) -> str:
+    """Read a file, resolving a skill's explicitly routed contract references.
+
+    Detailed readiness, reporting, language, and Terraform rules intentionally
+    live outside always-loaded SKILL.md files. These checks validate the
+    effective contract instead of requiring the same prose in every caller.
+    Separate tests below still verify that each skill links its required refs.
+    """
+    text = _read_raw(path)
+    references = {
+        OTEL_AUDIT: [
+            REPORT_FLOW,
+            GENAI_REF,
+            SKILLS_DIR / "otel-audit" / "references" / "source-discovery.md",
+            SKILLS_DIR / "otel-audit" / "references" / "schema-v2-contract.md",
+        ],
+        OTEL_INSTRUMENT: [
+            REPORT_FLOW,
+            GENAI_REF,
+            SKILLS_DIR / "references" / "full-runtime-acceptance.md",
+            SKILLS_DIR / "otel-instrument" / "references" / "json-approval-handoff.md",
+            SKILLS_DIR / "otel-instrument" / "references" / "project-runtime-validation.md",
+            INSTRUMENT_READINESS,
+            SKILLS_DIR / "otel-instrument" / "references" / "signal-mapping-guide.md",
+            *sorted((SKILLS_DIR / "otel-instrument" / "references" / "languages").glob("*.md")),
+        ],
+        OTEL_VERIFY: [
+            REPORT_FLOW,
+            SKILLS_DIR / "references" / "full-runtime-acceptance.md",
+            SKILLS_DIR / "otel-verify" / "references" / "json-approval-handoff.md",
+            SKILLS_DIR / "otel-verify" / "references" / "path-scenario-coverage.md",
+        ],
+        SPLUNK_CONFIGURE: [
+            REPORT_FLOW,
+            GENAI_REF,
+            SPLUNK_CONFIGURE_REFS / "detector-classification.md",
+            SPLUNK_CONFIGURE_REFS / "input-and-validation-contract.md",
+            SPLUNK_CONFIGURE_REFS / "terraform-templates.md",
+        ],
+    }.get(path, [])
+    return "\n".join([text, *(_read_raw(reference) for reference in references)])
+
+
+def _squash(text: str) -> str:
+    return " ".join(text.split())
 
 
 def test_genai_reference_covers_otel_semconv_signals():
@@ -63,9 +115,9 @@ def test_genai_reference_requires_nested_trace_shape_generically():
     assert not missing
 
 
-def test_genai_reference_requires_span_first_trace_explorer_contract():
-    text = _read(GENAI_REF)
-    instrument = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
+def test_genai_reference_owns_span_first_trace_explorer_contract():
+    text = _read_raw(GENAI_REF)
+    instrument = _read_raw(OTEL_INSTRUMENT)
     reference_required_terms = [
         "Obstudio GenAI Trace UI Contract",
         "span-first",
@@ -78,19 +130,10 @@ def test_genai_reference_requires_span_first_trace_explorer_contract():
         "first_event_timeout",
         "stream close reason family",
     ]
-    instrument_required_terms = [
-        "local span-first trace explorers such as Obstudio",
-        "metrics alone are not enough",
-        "gen_ai.usage.input_tokens",
-        "gen_ai.usage.output_tokens",
-        "gen_ai.usage.total_tokens",
-        "first_event_timeout",
-        "send/write failure",
-    ]
     missing = [term for term in reference_required_terms if term not in text]
     assert not missing
-    missing = [term for term in instrument_required_terms if term not in instrument]
-    assert not missing
+    assert "../references/genai-readiness.md" in instrument
+    assert "./references/readiness-implementation.md" in instrument
 
 
 def test_genai_skills_require_model_call_lifecycle_spans():
@@ -119,9 +162,10 @@ def test_genai_skills_require_model_call_lifecycle_spans():
 
 
 def test_genai_skills_require_single_canonical_span_source():
-    audit = _read(SKILLS_DIR / "otel-audit" / "SKILL.md")
-    instrument = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
-    reference = _read(GENAI_REF)
+    audit = _read_raw(OTEL_AUDIT)
+    instrument = _squash(_read_raw(INSTRUMENT_READINESS))
+    instrument_core = _read_raw(OTEL_INSTRUMENT)
+    reference = _squash(_read_raw(GENAI_REF))
     shared_terms = [
         "Single-Source GenAI Span Contract",
         "framework/vendor",
@@ -135,21 +179,21 @@ def test_genai_skills_require_single_canonical_span_source():
         "stable model/tool names",
         "parent shape",
     ]
-    for raw_text in (reference, audit, instrument):
-        text = " ".join(raw_text.split())
-        missing = [term for term in shared_terms if term not in text]
-        assert not missing
+    missing = [term for term in shared_terms if term not in reference]
+    assert not missing
+    assert "../references/genai-readiness.md" in audit
+    assert "../references/genai-readiness.md" in instrument_core
+    assert "./references/readiness-implementation.md" in instrument_core
 
     instrument_only_terms = [
-        "do not create duplicate app-owned",
+        "Do not create duplicate app-owned",
         "disable, opt out of, or suppress overlapping framework/vendor GenAI instrumentation",
         "discovered runtime mechanism",
         "Do not hard-code this decision to one framework",
         "Keep HTTP/database/runtime auto-instrumentation",
     ]
-    instrument_normalized = " ".join(instrument.split())
     missing = [
-        term for term in instrument_only_terms if term not in instrument_normalized
+        term for term in instrument_only_terms if term not in instrument
     ]
     assert not missing
 
@@ -516,15 +560,19 @@ def test_genai_reference_covers_incident_discovered_ai_pathways():
 
 
 def test_audit_and_instrument_load_genai_reference():
-    audit = _read(SKILLS_DIR / "otel-audit" / "SKILL.md")
-    instrument = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
+    audit = _read_raw(OTEL_AUDIT)
+    instrument = _read_raw(OTEL_INSTRUMENT)
     for text in (audit, instrument):
         assert "../references/genai-readiness.md" in text
         assert "GenAI" in text
         assert "LLM" in text
-        assert "GenAI Semconv Source Contract" in text
-        assert "live-or-snapshot provenance" in text
-        assert "semconv closure matrix" in text
+    assert "GenAI Semconv Source Contract" in audit
+    assert "GenAI Semconv Source Contract" in instrument
+    assert "live-or-snapshot provenance" in audit
+    assert "live-or-snapshot provenance" in instrument
+    assert "semconv closure matrix" in audit
+    assert "semconv closure matrix" in instrument
+    assert "./references/readiness-implementation.md" in instrument
 
 
 def test_instrument_requires_genai_incident_gap_closure():
@@ -554,9 +602,10 @@ def test_instrument_requires_genai_incident_gap_closure():
     assert not missing
 
 
-def test_genai_readiness_contract_does_not_require_opaque_ids():
-    audit = _read(SKILLS_DIR / "otel-audit" / "SKILL.md")
-    instrument = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
+def test_genai_readiness_contract_uses_validator_compatible_fields():
+    audit_raw = _read_raw(OTEL_AUDIT)
+    audit = _read(OTEL_AUDIT)
+    instrument = _read_raw(INSTRUMENT_READINESS)
     configure = _read(SPLUNK_CONFIGURE)
     audit_normalized = " ".join(audit.split())
     instrument_normalized = " ".join(instrument.split())
@@ -564,21 +613,23 @@ def test_genai_readiness_contract_does_not_require_opaque_ids():
         "GenAI readiness contract",
         "complete GenAI observability ledger",
         "Only telemetry closure rows from that ledger become instrumentation findings",
-        "surface`, `evidence`, `current_status`, `required_signals`",
+        "`surface`, `status`, `evidence`, `required_signals`, `owner`, `acceptance_criteria`, and `impact`",
         "the surface name as the human-facing identifier",
     ]
     required_instrument_terms = [
-        "GenAI Readiness Contract",
-        "Parse each row by human-readable `surface`",
+        "Incident And GenAI Surface Closure",
+        "Parse each selected `genai_readiness` row by human-readable `surface`",
         "Use the surface name as the human-facing identifier",
         "surface -> required_signals -> implemented_signals -> tests",
     ]
     assert not [term for term in required_audit_terms if term not in audit_normalized]
+    assert "current_status" not in audit_raw
+    assert "owner/source_files" not in audit_raw
     assert not [
         term for term in required_instrument_terms if term not in instrument_normalized
     ]
     assert "every independently actionable surface row" in configure
-    assert "| Surface | Audit Status | Missing Signal |" in configure
+    assert "consume every independently actionable surface row" in configure
 
 
 def test_audit_keeps_genai_governance_and_cost_context_out_of_default_findings():
@@ -642,21 +693,19 @@ def test_assistant_v3_framework_bridge_eval_covers_duplicate_span_risk():
 
 
 def test_instrument_requires_eval_trace_events_not_metrics_only():
-    instrument = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
-    reference = _read(GENAI_REF)
+    instrument = _squash(_read_raw(INSTRUMENT_READINESS))
+    reference = _squash(_read_raw(GENAI_REF))
     required_instrument_terms = [
-        "For evaluation quality surfaces",
-        "evaluator classes",
-        "scoring functions",
-        "LLM-as-judge",
-        "`EvalScore` models",
-        "faithfulness/similarity/expectation metrics",
-        "Metrics-only coverage does not satisfy selected-trace eval visibility",
-        "`gen_ai.evaluation.result` on the relevant workflow/evaluation span",
+        "selected evaluation-quality surface",
+        "owning evaluator or scoring path",
+        "`gen_ai.evaluation.result` on the relevant workflow or evaluation span",
+        "`gen_ai.evaluation.name`",
         "`gen_ai.evaluation.score.value`",
         "`gen_ai.evaluation.score.label`",
-        "span-level eval event",
-        "keep the evaluation quality surface partial",
+        "safe parent linkage",
+        "detector-ready score, count, latency, error, no-data, and freshness metrics",
+        "Metrics-only coverage does not satisfy selected-trace evaluation visibility",
+        "keep the surface partial",
     ]
     required_reference_terms = [
         "counters/histograms without",
@@ -694,11 +743,13 @@ def test_audit_requires_genai_incident_surface_mapping():
 
 
 def test_audit_and_instrument_cover_genai_deployment_and_data_job_failures():
-    audit = _read(SKILLS_DIR / "otel-audit" / "SKILL.md")
-    instrument = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
-    required_terms = [
+    audit = _read_raw(OTEL_AUDIT)
+    instrument = _read_raw(OTEL_INSTRUMENT)
+    reference = _squash(_read_raw(GENAI_REF)).casefold()
+    implementation = _squash(_read_raw(INSTRUMENT_READINESS)).casefold()
+    required_reference_terms = [
         "prompt/response assembly",
-        "AI-derived data",
+        "ai-derived data",
         "synthetic/canary",
         "model/config compatibility",
         "detector reliability evidence",
@@ -709,9 +760,17 @@ def test_audit_and_instrument_cover_genai_deployment_and_data_job_failures():
         "prompt/tool schema version",
         "expected-vs-running model/config",
     ]
-    for text in (audit, instrument):
-        missing = [term for term in required_terms if term not in text]
-        assert not missing
+    assert not [term for term in required_reference_terms if term not in reference]
+    for core in (audit, instrument):
+        assert "../references/genai-readiness.md" in core
+    assert "./references/readiness-implementation.md" in instrument
+    for surface in (
+        "prompt/response",
+        "ai-derived data",
+        "model/config rollout",
+        "token/context",
+    ):
+        assert surface in implementation
 
 
 def test_genai_token_pressure_partial_closure_contract():
@@ -733,25 +792,36 @@ def test_genai_token_pressure_partial_closure_contract():
 
 
 def test_instrument_requires_token_pressure_residuals_in_final_closure():
-    text = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
-    required_terms = [
-        "broadly asks for GenAI readiness",
-        "prompt/tool schema size or safe proxy",
-        "detector-ready proxy metric",
+    reference = _squash(_read_raw(GENAI_REF))
+    implementation = _squash(_read_raw(INSTRUMENT_READINESS))
+    required_reference_terms = [
+        "context budget percent",
+        "truncation rate",
+        "token-limit errors",
+        "prompt/tool schema size",
+        "LLM call count per turn",
+        "tool call count per turn",
         "schema JSON length bucket",
         "schema field count",
-        "Span attributes like prompt template version",
-        "do not close prompt/tool schema size pressure",
         "remaining_signals",
-        "For every GenAI instrumentation run, include a concise closure summary",
-        "If canonical audit JSON is absent",
         "Remaining signals: none",
-        "Final summaries, PR descriptions, and audit updates must not omit",
-        "LLM-call fanout",
-        "tool-call fanout",
     ]
-    missing = [term for term in required_terms if term not in text]
-    assert not missing
+    required_implementation_terms = [
+        "For token/context pressure",
+        "low-cardinality detector-ready proxy",
+        "schema JSON length bucket",
+        "schema field count",
+        "Prompt/schema version span attributes are trace context; they do not close schema-size pressure",
+        "Exact Remaining-Signal Gate",
+        "Final summaries and PR descriptions must preserve exact residual",
+        "Remaining signals: none",
+    ]
+    assert not [
+        term for term in required_reference_terms if term not in reference
+    ]
+    assert not [
+        term for term in required_implementation_terms if term not in implementation
+    ]
 
 
 def test_genai_reference_requires_schema_pressure_metric_or_remaining_signal():
@@ -802,9 +872,9 @@ def test_audit_distinguishes_demo_env_from_complete_genai_telemetry_setup():
 
 
 def test_instrument_requires_mcp_safe_dimensions_send_failure_and_tests():
-    text = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
+    text = _squash(_read_raw(INSTRUMENT_READINESS))
     required_terms = [
-        "Never record JSON-RPC request IDs",
+        "never record JSON-RPC request IDs",
         "known route/tool registration",
         "unknown_method",
         "send/write failure signal",
@@ -813,7 +883,7 @@ def test_instrument_requires_mcp_safe_dimensions_send_failure_and_tests():
         "tool error/timeout counter",
         "owner-map the missing source explicitly",
         "focused repo-native test",
-        "Do not finalize with a compile",
+        "do not finalize with a compile",
     ]
     missing = [term for term in required_terms if term not in text]
     assert not missing
@@ -883,7 +953,7 @@ def test_audit_keeps_genai_readiness_surfaces_independently_actionable():
 
 
 def test_instrument_requires_signals_changed_and_gap_closure():
-    instrument = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
+    instrument = _squash(_read_raw(OTEL_INSTRUMENT))
     required_terms = [
         "## Signals Changed",
         "## Audit Gap Closure",
@@ -893,25 +963,26 @@ def test_instrument_requires_signals_changed_and_gap_closure():
         "Do not claim a removal unless the previous report or Git diff proves",
         "Use one row per selected audit finding",
         "Derive `**Result:**` from all applicable closure tables",
-        "render `.observe/otel-instrumentation.html` using",
+        "render-instrumentation-html",
+        ".observe/otel-instrumentation.html",
     ]
     missing = [term for term in required_terms if term not in instrument]
     assert not missing
 
 
 def test_instrument_requires_route_aware_http_proof_and_source_owned_closure():
-    instrument = " ".join(
-        _read(SKILLS_DIR / "otel-instrument" / "SKILL.md").split()
-    )
+    instrument = _squash(_read_raw(INSTRUMENT_READINESS))
+    instrument_core = _read_raw(OTEL_INSTRUMENT)
     required_terms = [
         "route-aware server spans are required",
         "low-cardinality route pattern",
-        "do not emit duplicate server spans",
+        "must not emit duplicate server spans",
         "When no canonical source audit exists, do not create `## GenAI Readiness Closure`",
-        "do not collapse absent GenAI readiness into a generic implementation claim",
+        "or collapse absent GenAI readiness into a generic implementation claim",
     ]
     missing = [term for term in required_terms if term not in instrument]
     assert not missing
+    assert "./references/readiness-implementation.md" in instrument_core
 
 
 def test_instrument_requires_attempt_or_exact_full_runtime_blocker():
@@ -1043,36 +1114,33 @@ def test_genai_classification_does_not_treat_generic_model_terms_as_genai():
 
 
 def test_genai_audit_and_instrument_require_new_gap_closure_surfaces():
-    audit = _read(SKILLS_DIR / "otel-audit" / "SKILL.md")
-    instrument = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
-    required_audit_terms = [
+    reference = _squash(_read_raw(GENAI_REF)).casefold()
+    implementation = _squash(_read_raw(INSTRUMENT_READINESS))
+    required_reference_terms = [
         "memory/context",
         "evaluation quality",
         "content governance",
         "framework bridge",
-        "cost ownership",
+        "cost accounting",
         "gen_ai.evaluation.result",
         "evaluation score distribution",
-        "content capture mode/redaction/access owner",
+        "content capture mode, redaction/truncation status, retention/access owner",
         "owner-mapped billing source",
     ]
-    required_instrument_terms = [
-        "memory/context operations",
-        "evaluation quality",
-        "content governance",
-        "framework bridge",
-        "app-computed cost",
-        "gen_ai.evaluation.result",
-        "gen_ai.evaluation.score.value",
-        "gen_ai.input.messages",
-        "gen_ai.retrieval.documents",
-        "gen_ai.tool.call.arguments",
-        "search_memory",
-        "accurate pricing map",
-        "owner-map the billing or",
+    required_implementation_terms = [
+        "memory/context",
+        "evaluation",
+        "content-governance",
+        "framework-bridge",
+        "cost",
+        "owner-map an unsafe or external prerequisite with its exact missing source",
     ]
-    assert not [term for term in required_audit_terms if term not in audit]
-    assert not [term for term in required_instrument_terms if term not in instrument]
+    assert not [
+        term for term in required_reference_terms if term not in reference
+    ]
+    assert not [
+        term for term in required_implementation_terms if term not in implementation
+    ]
 
 
 def test_genai_guidance_stays_generic():
@@ -1119,7 +1187,7 @@ def test_genai_guidance_stays_generic():
         "workflow delivery/evaluation",
     ]
     for path in paths:
-        text = _read(path)
+        text = _read_raw(path)
         bad = [term for term in blocked_terms if term in text]
         assert not bad, f"{path} contains non-generic terms: {bad}"
 

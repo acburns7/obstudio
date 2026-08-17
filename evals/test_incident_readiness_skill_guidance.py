@@ -6,13 +6,50 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO_ROOT / "skills"
 INCIDENT_REF = SKILLS_DIR / "references" / "incident-readiness.md"
+REPORT_FLOW = SKILLS_DIR / "references" / "report-flow-contract.md"
+FULL_RUNTIME = SKILLS_DIR / "references" / "full-runtime-acceptance.md"
+OTEL_AUDIT = SKILLS_DIR / "otel-audit" / "SKILL.md"
+OTEL_INSTRUMENT = SKILLS_DIR / "otel-instrument" / "SKILL.md"
+INSTRUMENT_READINESS = (
+    SKILLS_DIR / "otel-instrument" / "references" / "readiness-implementation.md"
+)
 SPLUNK_CONFIGURE = SKILLS_DIR / "splunk-configure" / "SKILL.md"
 SPLUNK_CONFIGURE_REFS = SKILLS_DIR / "splunk-configure" / "references"
 
 
-def _read(path: Path) -> str:
+def _read_raw(path: Path) -> str:
     assert path.exists(), f"Expected file not found: {path}"
     return path.read_text()
+
+
+def _read(path: Path) -> str:
+    """Read the effective progressively disclosed contract for core skills."""
+    text = _read_raw(path)
+    references = {
+        OTEL_AUDIT: [
+            INCIDENT_REF,
+            REPORT_FLOW,
+            SKILLS_DIR / "otel-audit" / "references" / "source-discovery.md",
+            SKILLS_DIR / "otel-audit" / "references" / "schema-v2-contract.md",
+        ],
+        OTEL_INSTRUMENT: [
+            INCIDENT_REF,
+            REPORT_FLOW,
+            FULL_RUNTIME,
+            SKILLS_DIR / "otel-instrument" / "references" / "json-approval-handoff.md",
+            SKILLS_DIR / "otel-instrument" / "references" / "project-runtime-validation.md",
+            INSTRUMENT_READINESS,
+            *sorted((SKILLS_DIR / "otel-instrument" / "references" / "languages").glob("*.md")),
+        ],
+        SPLUNK_CONFIGURE: [
+            INCIDENT_REF,
+            SKILLS_DIR / "references" / "report-flow-contract.md",
+            SPLUNK_CONFIGURE_REFS / "detector-classification.md",
+            SPLUNK_CONFIGURE_REFS / "input-and-validation-contract.md",
+            SPLUNK_CONFIGURE_REFS / "terraform-templates.md",
+        ],
+    }.get(path, [])
+    return "\n".join([text, *(_read_raw(reference) for reference in references)])
 
 
 def _squash(text: str) -> str:
@@ -98,12 +135,13 @@ def test_python_auto_instrumentation_example_uses_current_environment_attribute(
 
 
 def test_audit_and_instrument_load_incident_reference():
-    audit = _read(SKILLS_DIR / "otel-audit" / "SKILL.md")
-    instrument = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
-    for text in (audit, instrument):
-        assert "../references/incident-readiness.md" in text
-        assert "incident-readiness" in text
-        assert "faster incident detection" in text
+    audit = _read_raw(OTEL_AUDIT)
+    instrument = _read_raw(OTEL_INSTRUMENT)
+    assert "../references/incident-readiness.md" in audit
+    assert "../references/incident-readiness.md" in instrument
+    assert "incident detectability" in audit
+    assert "Requests for faster incident detection/localization" in instrument
+    assert "./references/readiness-implementation.md" in instrument
 
 
 def test_instrument_allows_recommended_semconv_readiness_signals():
@@ -138,11 +176,11 @@ def test_instrument_requires_signal_level_mttd_role_inventory():
 
 
 def test_instrument_requires_multi_process_and_concurrency_proof():
-    instrument = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
-    incident = _read(INCIDENT_REF)
+    instrument = _read_raw(OTEL_INSTRUMENT)
+    incident = _squash(_read_raw(INCIDENT_REF))
     required_terms = [
         "distinct, operator-overridable `service.name` default",
-        "actual entrypoint or startup hook",
+        "real entrypoint or startup hook",
         "must not initialize",
         "explicitly record failure outcome",
         "enqueue success/failure and worker task success/failure",
@@ -150,21 +188,16 @@ def test_instrument_requires_multi_process_and_concurrency_proof():
         "`go test -race`",
         "normal `go test` pass",
         "toolchain/platform blocker",
-        "drive each incident state to a non-default value",
-        "metric registration, name presence, or a zero-value observation",
+        "drive the underlying app state to a non-default value",
+        "Instrument registration, metric-name presence, and zero-value gauge collection",
         "saturated or deterministic backpressure path",
         "nonzero depth and oldest-age values",
         "keep the verification result `Partial`",
     ]
-    combined = _squash(f"{instrument}\n{incident}")
-    missing = [term for term in required_terms if term not in combined]
+    missing = [term for term in required_terms if term not in incident]
     assert not missing
-    for required in [
-        "distinct, operator-overridable `service.name` default",
-        "`go test -race`",
-    ]:
-        assert required in _squash(instrument)
-        assert required in _squash(incident)
+    assert "../references/incident-readiness.md" in instrument
+    assert "../references/full-runtime-acceptance.md" in instrument
 
 
 def test_incident_freshness_age_requires_demand_or_cadence_evidence():
@@ -184,17 +217,18 @@ def test_incident_freshness_age_requires_demand_or_cadence_evidence():
 
 
 def test_instrument_converts_incident_readiness_audit_to_patchable_work():
-    text = _squash(_read(SKILLS_DIR / "otel-instrument" / "SKILL.md"))
+    text = _squash(_read_raw(OTEL_INSTRUMENT))
     required_terms = [
         "Audit-Driven Incident Readiness",
-        "partial or missing `current_instrumentation.incident_readiness` rows",
-        "selected finding with the same `area`",
-        "implementation contract",
-        "every safe app-owned incident gap",
-        "create the selection before editing",
+        "each partial or missing `current_instrumentation.incident_readiness` row",
+        "selected finding having the same `area`",
+        "one implementation contract",
+        "Broad incident-readiness requests select every safe app-owned incident gap before editing",
+        "Do not edit until a validated selection has nonempty `approved_ids`",
         "Do not choose one representative gap",
-        "add or prove the applicable surfaces",
-        "no placeholder instrument",
+        "A row cannot be `Working` while a required signal is absent",
+        "Owner-map an unsafe or externally owned prerequisite",
+        "add no placeholder instrument",
         "MTTD-improving",
     ]
     missing = [term for term in required_terms if term not in text]
@@ -202,42 +236,45 @@ def test_instrument_converts_incident_readiness_audit_to_patchable_work():
 
 
 def test_instrument_requires_gap_closure_matrix_for_incident_readiness():
-    text = _squash(_read(SKILLS_DIR / "otel-instrument" / "SKILL.md"))
+    text = _squash(_read_raw(OTEL_INSTRUMENT))
     required_terms = [
         "Audit-Driven Gap Closure",
         "validated dependency-closed selected finding set as the implementation queue",
         "Build an internal closure matrix before editing",
         "finding ID -> area -> priority -> required fix -> instrument mode -> planned action",
         "Use one row per selected audit finding",
-        "keep unselected findings out of this implementation report",
-        "Working / Not working / Not proven / Not configured",
+        "keep unselected findings out of this implementation report and canonical instrumentation JSON",
+        "`Working`",
+        "`Not working`",
+        "`Not proven`",
+        "`Not configured`",
         "Deferred",
-        "Do not report unselected findings as implemented work",
         "manual decision",
-        "owner-map the exact prerequisite",
-        "required signals",
-        "remaining signals",
+        "Owner-map an unsafe or externally owned prerequisite",
+        "required fix",
+        "remaining signal or owner",
     ]
     missing = [term for term in required_terms if term not in text]
     assert not missing
 
 
 def test_instrument_requires_incident_evidence_gap_closure():
-    skill = _read(SKILLS_DIR / "otel-instrument" / "SKILL.md")
-    reference = _squash(_read(INCIDENT_REF))
+    skill = _squash(_read_raw(OTEL_INSTRUMENT))
+    reference = _squash(_read_raw(INCIDENT_REF))
     required_skill_terms = [
         "Incident-Evidence Mode",
         "failure mechanism",
-        "owning code or platform surface",
+        "owner -> code surface",
         "MTTD-improving",
-        "queue depth/lag/oldest age",
-        "stream/long-lived connection",
+        "queue depth, consumer lag, oldest message age",
+        "Streams and long-lived connections",
         "auth/edge",
-        "scheduled-job last success",
+        "last-success timestamp",
         "release/config",
     ]
-    missing_skill = [term for term in required_skill_terms if term not in skill]
-    assert not missing_skill
+    assert "../references/incident-readiness.md" in skill
+    assert "Incident-Evidence Mode" in reference
+    assert not [term for term in required_skill_terms if term not in reference]
 
     required_reference_terms = [
         "Incident-Evidence Mode",
@@ -255,16 +292,16 @@ def test_instrument_requires_incident_evidence_gap_closure():
 
 
 def test_instrument_requires_generic_runtime_surface_closure():
-    skill = _squash(_read(SKILLS_DIR / "otel-instrument" / "SKILL.md"))
-    reference = _squash(_read(INCIDENT_REF))
+    skill = _squash(_read_raw(OTEL_INSTRUMENT))
+    reference = _squash(_read_raw(INCIDENT_REF))
     required_skill_terms = [
-        "load `../references/incident-readiness.md`",
+        "Follow `../references/incident-readiness.md`",
         "queue depth/lag/oldest age",
         "worker/pool saturation",
         "stream/long-lived connection",
         "active count",
         "send/write failure",
-        "A row cannot be `Working` while any required signal is absent",
+        "A row cannot be `Working` while a required signal is absent",
     ]
     required_reference_terms = [
         "Executors and queues",
@@ -281,11 +318,11 @@ def test_instrument_requires_generic_runtime_surface_closure():
 
 
 def test_instrument_skips_custom_prompt_for_incident_readiness_requests():
-    text = _squash(_read(SKILLS_DIR / "otel-instrument" / "SKILL.md"))
+    text = _squash(_read_raw(OTEL_INSTRUMENT))
     required_terms = [
         "Skip this prompt",
         "incident-readiness or GenAI/LLM",
-        "Audit-Driven Readiness path",
+        "Audit-Driven Incident Readiness",
         "safe app-owned incident gap",
         "scoped",
         "signals",
@@ -329,18 +366,16 @@ def test_splunk_configure_consumes_current_main_gaps_section():
 
 
 def test_audit_maps_incident_readiness_to_current_gap_contract():
-    audit = _squash(_read(SKILLS_DIR / "otel-audit" / "SKILL.md"))
-    report_contract = _squash(_read(SKILLS_DIR / "references" / "report-flow-contract.md"))
-    required_terms = [
-        "### Incident Readiness",
-        "single prioritized `## Gaps` table",
-        "`Area` is the stable human-readable gap identity",
-        "`Required fix` names every required signal",
-        "mapped acceptance scenarios",
-        "Split a gap when required signals have different owners",
-        "Do not mark a partial surface covered",
+    audit = _squash(_read_raw(OTEL_AUDIT))
+    report_contract = _squash(_read_raw(REPORT_FLOW))
+    required_audit_terms = [
+        "Deterministic gap section contract",
+        "canonical audit has exactly one actionable gap source: `findings`",
+        "Give the audit, every finding, environment, and scenario stable IDs",
+        "exact fix or prerequisite",
+        "mapped scenario IDs",
     ]
-    missing = [term for term in required_terms if term not in audit]
+    missing = [term for term in required_audit_terms if term not in audit]
     assert not missing
     assert "## Gap Ledger" not in audit
     required_contract_terms = [
@@ -356,14 +391,14 @@ def test_audit_maps_incident_readiness_to_current_gap_contract():
 
 
 def test_instrument_reconciles_current_audit_gap_contract():
-    instrument = _squash(_read(SKILLS_DIR / "otel-instrument" / "SKILL.md"))
+    instrument = _squash(_read_raw(OTEL_INSTRUMENT))
     required_terms = [
         "Audit-Driven Gap Closure",
         "validated dependency-closed selected finding set as the implementation queue",
         "Build an internal closure matrix before editing",
         "area -> priority -> required fix -> instrument mode -> planned action",
         "Use one row per selected audit finding",
-        "Canonical instrumentation JSON contains selected rows only",
+        "keep unselected findings out of this implementation report and canonical instrumentation JSON",
         "Not working",
         "Not proven",
         "Not configured",
@@ -400,11 +435,49 @@ def test_splunk_configure_no_metrics_still_reports_prerequisites():
     assert not missing
 
 
+def test_splunk_configure_distinguishes_dashboard_prerequisite_and_empty_paths():
+    skill = _squash(_read_raw(SPLUNK_CONFIGURE))
+    required_terms = [
+        "no detector-ready metric exists but accepted evidence supports a requested dashboard",
+        "generate the dashboard resources plus both configure reports",
+        "`--dashboards-report .observe/dashboards.md`",
+        "gaps or readiness prerequisites exist",
+        "prerequisites-only `Blocked` result",
+        "prerequisites-only validator can still pass its provenance and report-structure checks",
+        "neither accepted resources nor gaps exist",
+        "without creating artifacts",
+    ]
+    missing = [term for term in required_terms if term not in skill]
+    assert not missing
+
+
+def test_splunk_configure_does_not_turn_desired_only_dashboards_into_hcl():
+    skill = _squash(_read_raw(SPLUNK_CONFIGURE))
+    assert (
+        "`.observe/terraform/dashboards.tf` only when accepted evidence supports "
+        "dashboard resources"
+    ) in skill
+    assert "when accepted evidence supports at least one Terraform resource" in skill
+    assert "report-only desired-state specification" in skill
+    assert "desired-only specification never authorizes dashboard HCL" in skill
+
+
+def test_splunk_configure_routes_specialized_readiness_contracts():
+    skill = _read_raw(SPLUNK_CONFIGURE)
+    assert "../references/incident-readiness.md" in skill
+    assert "../references/genai-readiness.md" in skill
+    assert "meta.genai_ownership_detected" in skill
+
+
 def test_splunk_configure_consumes_incident_readiness_section():
     skill = _squash(_read(SPLUNK_CONFIGURE))
     required_terms = [
         "**Incident readiness** from `current_instrumentation.incident_readiness`",
-        "Join partial or missing rows to findings with the same area when possible",
+        "preserve `area`, `status`, `evidence`, `required_signals`, and `impact`",
+        "Every `partial`, `missing`, or `owner-mapped` row must map to an unresolved finding",
+        "identical area and to a verification scenario",
+        "matching finding's `external_owner` or `decision_owner`",
+        "readiness rows do not carry an owner field",
         "For every incident-readiness area",
         "unless equivalent metrics are source-backed and proven",
         "Do not generate a detector for a missing or unverified signal",
@@ -552,21 +625,32 @@ def test_dashboard_group_template_includes_provider_required_description():
 
 
 def test_audit_keeps_current_main_report_contract():
-    audit = _read(SKILLS_DIR / "otel-audit" / "SKILL.md")
-    current_report_terms = [
-        "`signal_flow.component_flow_map`",
+    audit = _squash(_read_raw(OTEL_AUDIT))
+    report_contract = _squash(_read_raw(REPORT_FLOW))
+    current_audit_terms = [
+        "`signal_flow`",
         "`current_instrumentation`",
         "`findings`",
-        "machine-readable priority",
-        "`area`",
-        "`required_fix`",
-        '"priority":',
-        '"instrument_mode":',
-        '"verification_scenarios":',
-        "`verification.environments`",
+        "`verification`",
+        "`product_outcome`",
+        "expected telemetry",
+        "mapped scenario IDs",
+        "priorities `required`, `recommended`, or `deferred`",
+        "instrument modes `default`, `fix all`, `manual decision`, or `external follow-up`",
+        "every finding, environment, and scenario stable IDs",
         "Human HTML must not render full",
     ]
-    assert not [term for term in current_report_terms if term not in audit]
+    assert not [term for term in current_audit_terms if term not in audit]
+    current_report_terms = [
+        "machine-readable priority",
+        "### Component Flow Map",
+        "| Area | Status | Evidence | Required Signals / Gap | Detection / Localization Impact |",
+        "### Test Environments",
+        "### Acceptance Scenarios",
+        "exact action, expected telemetry, proof level, and acceptance criteria",
+        "| Priority | Area | Gap | Why it matters | Required fix | Instrument mode | Verification scenarios |",
+    ]
+    assert not [term for term in current_report_terms if term not in report_contract]
     assert "| Priority | Area | Gap | User Impact | Fix | Instrument Mode |" not in audit
     assert "## Gap Ledger" not in audit
 
@@ -585,7 +669,7 @@ def test_incident_readiness_guidance_stays_generic_and_non_genai():
         "gen_ai",
         "RAG",
     ]
-    assert not [term for term in genai_terms if term in _read(INCIDENT_REF)]
+    assert not [term for term in genai_terms if term in _read_raw(INCIDENT_REF)]
 
     blocked_project_terms = [
         "IR-",
@@ -615,6 +699,6 @@ def test_incident_readiness_guidance_stays_generic_and_non_genai():
         "workflow delivery/evaluation",
     ]
     for path in [INCIDENT_REF, *shared_skill_paths]:
-        text = _read(path)
+        text = _read_raw(path)
         bad = [term for term in blocked_project_terms if term in text]
         assert not bad, f"{path} contains project-specific terms: {bad}"

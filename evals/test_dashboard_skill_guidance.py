@@ -36,9 +36,30 @@ DASHBOARD_TEMPLATES = SPLUNK_DASHBOARD_REFS / "dashboard-templates.md"
 SPLUNK_DASHBOARD_PUBLISH = SKILLS_DIR / "splunk-dashboard-publish" / "SKILL.md"
 SPLUNK_DASHBOARD_PUBLISH_REFS = SKILLS_DIR / "splunk-dashboard-publish" / "references"
 DASHBOARD_COVERAGE_MODEL = SPLUNK_DASHBOARD_PUBLISH_REFS / "dashboard-coverage-model.md"
+DETECTOR_PUBLISH_OFFLINE_EVAL = (
+    REPO_ROOT
+    / "evals"
+    / "dashboards"
+    / "checkout-detectors"
+    / "eval"
+    / "qual"
+    / "detector-publish.json"
+)
+DASHBOARD_PUBLISH_OFFLINE_EVAL = (
+    REPO_ROOT
+    / "evals"
+    / "dashboards"
+    / "checkout-sync"
+    / "eval"
+    / "qual"
+    / "dashboard-publish.json"
+)
 
 # Detector publish skill (canonical; splunk-sync is the deprecated stub).
 SPLUNK_DETECTOR_PUBLISH = SKILLS_DIR / "splunk-detector-publish" / "SKILL.md"
+DETECTOR_COVERAGE_MODEL = (
+    SKILLS_DIR / "splunk-detector-publish" / "references" / "coverage-model.md"
+)
 SPLUNK_CONFIGURE_REFS = SKILLS_DIR / "splunk-configure" / "references"
 
 
@@ -470,6 +491,41 @@ def test_dashboard_publish_classifies_three_levels():
         assert status in coverage
 
 
+def test_detector_publish_offline_eval_fails_closed():
+    """A failed live fetch cannot prove a detector is absent or authorize POST."""
+    case = json.loads(_read(DETECTOR_PUBLISH_OFFLINE_EVAL))
+    prompt = case["prompts"][0]["task"]
+    rubric = " ".join(case["rubric"])
+
+    assert "classify every detector as UNCERTAIN, not GAP" in prompt
+    assert "all three detectors as UNCERTAIN" in rubric
+    assert "Any all-GAP fallback fails this criterion" in rubric
+    assert "sends no POST /v2/detector" in rubric
+
+
+def test_dashboard_publish_live_fetch_failure_fails_closed():
+    """Both dashboard guidance sources must make incomplete inventory read-only."""
+    for path in (SPLUNK_DASHBOARD_PUBLISH, DASHBOARD_COVERAGE_MODEL):
+        text = _normalized(path).lower()
+        assert "mark every local group, dashboard, and chart **uncertain**" in text
+        for method in ("`POST`", "`PUT`", "`DELETE`"):
+            assert method.lower() in text, (
+                f"{path} must prohibit {method} after a live-fetch failure"
+            )
+
+
+def test_dashboard_publish_offline_eval_rejects_all_gap_fallback():
+    """The offline eval must reward UNCERTAIN and reject GAP when fetch fails."""
+    case = json.loads(_read(DASHBOARD_PUBLISH_OFFLINE_EVAL))
+    prompt = case["prompts"][0]["task"]
+    rubric = " ".join(case["rubric"])
+
+    assert "classify every group, dashboard, and chart as UNCERTAIN, not GAP" in prompt
+    assert "Rejects an all-GAP offline fallback" in rubric
+    assert "no group, dashboard, or chart may be GAP or COVERED" in rubric
+    assert "sends no Splunk POST, PUT, or DELETE request" in rubric
+
+
 def test_dashboard_publish_requires_service_filter_for_chart_covered():
     coverage = _read(DASHBOARD_COVERAGE_MODEL)
     assert "service.name" in coverage, "chart COVERED must require the service.name filter"
@@ -477,15 +533,22 @@ def test_dashboard_publish_requires_service_filter_for_chart_covered():
     assert "options.type" in coverage, "chart match must compare the live options.type"
 
 
-def test_dashboard_publish_only_skips_http_500_and_forbids_bare_except():
-    """Inverse of the detector test: the dashboard publish skill + shared splunk-api.md carry the
-    explicit prohibition string ("never a bare except Exception"), so assert the guidance is
-    PRESENT here rather than absent."""
-    skill = _read(SPLUNK_DASHBOARD_PUBLISH)
-    api = _read(SPLUNK_API_REF)
-    assert "500" in skill and "500" in api, "skip-on-500 behavior must be documented"
-    assert "Only HTTP 500 is skipped" in api, "splunk-api.md must state only 500 is skipped"
-    # The shared ref forbids swallowing everything in a bare except.
+def test_skipped_pagination_page_forces_incomplete_inventory():
+    """Continuing after a broken offset may collect diagnostics, never a writable diff."""
+    api = _normalized(SPLUNK_API_REF)
+    assert "skipped_offsets = []" in api
+    assert "skipped_offsets.append(offset)" in api
+    assert "inventory_complete = consecutive_empty >= 5 and not skipped_offsets" in api
+    assert "Any skipped or failed page makes the inventory incomplete" in api
+    assert "classify all local objects UNCERTAIN" in api
+    assert "no write request" in api
+
+    for path in (SPLUNK_DETECTOR_PUBLISH, SPLUNK_DASHBOARD_PUBLISH):
+        text = _normalized(path).lower()
+        assert "any skipped offset makes the inventory incomplete" in text
+        assert "successful complete fetch returning zero" in text
+
+    # The shared ref still forbids swallowing non-500 failures.
     assert "except Exception" in api, "splunk-api.md must name the bare-except anti-pattern it forbids"
     assert "do **not**" in api.lower() or "do not" in api.lower(), (
         "splunk-api.md must explicitly forbid the bare except"
@@ -633,17 +696,47 @@ def test_m6_500_counter_separate_from_empty_counter():
     assert "Do NOT increment consecutive_empty" in text or "do NOT increment consecutive_empty" in text, (
         "splunk-api.md 500-handler must document that it does not increment consecutive_empty"
     )
-
-
-def test_m2_409_includes_get_for_existing_id():
-    """m2 regression guard: a chart POST 409 must include a step to GET the
-    existing chart's ID so it can be referenced in the dashboard charts[] array."""
-    text = _read(SPLUNK_API_REF)
-    # The 409 row now describes fetching the existing object's id.
-    assert "GET /v2/" in text and "409" in text, (
-        "splunk-api.md 409 row must instruct fetching the existing object's id"
+    assert "skipped_offsets.append(offset)" in text, (
+        "a continued 500 page must remain explicit incomplete-inventory evidence"
     )
-    assert "reuse" in text.lower(), "409 handling must say to reuse the existing id"
+
+
+def test_409_race_requires_full_structural_reclassification_before_reuse():
+    """A duplicate name cannot bypass the object-specific COVERED criteria."""
+    api = _normalized(SPLUNK_API_REF)
+    api_lower = api.lower()
+    assert "never reuse by name alone" in api_lower
+    assert "rerun the same full classification" in api_lower
+    assert "reuse the existing id only when that fresh classification is `covered`" in api_lower
+    assert "partial, ambiguous, or divergent candidate `uncertain`" in api_lower
+    assert "stop every write that depends on that object" in api_lower
+
+    detector = _normalized(SPLUNK_DETECTOR_PUBLISH)
+    detector_coverage = _normalized(DETECTOR_COVERAGE_MODEL)
+    for text in (detector, detector_coverage):
+        assert "metric + resolved service filter + Standard-origin" in text
+        assert "never reuse by name alone" in text
+        assert "UNCERTAIN" in text
+    assert "treated as already-covered rather than an error" not in detector_coverage
+
+    dashboard = _normalized(SPLUNK_DASHBOARD_PUBLISH)
+    dashboard_coverage = _normalized(DASHBOARD_COVERAGE_MODEL)
+    for text in (dashboard, dashboard_coverage):
+        assert "structural classification" in text or "applicable level" in text
+        assert "partial, ambiguous, or divergent" in text
+        assert "dependent writes" in text
+
+
+def test_dashboard_409_tracks_created_charts_as_orphan_candidates():
+    """A raced dashboard POST must not silently strand its chart-first creates."""
+    publish = _normalized(SPLUNK_DASHBOARD_PUBLISH)
+    coverage = _normalized(DASHBOARD_COVERAGE_MODEL)
+    api = _normalized(SPLUNK_API_REF)
+    for text in (publish, coverage, api):
+        assert "orphan candidate" in text
+        assert "dashboard POST" in text
+        assert "implicit PUT" in text
+    assert "fresh inventory, a new plan, and explicit confirmation" in api
 
 
 def test_m2_put_dashboard_documented_for_chart_gap():

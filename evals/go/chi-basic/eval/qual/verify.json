@@ -10,7 +10,7 @@
         "eval/inputs/otel-selection.json",
         "eval/inputs/otel-verify.json"
       ],
-      "task": "Create ./service/.observe and copy the four canonical JSON files from ./service/eval/inputs into it. Use $otel-verify read-only to validate the complete bound audit -> selection -> instrumentation -> verify proof packet. Preserve the supplied canonical .observe/otel-verify.json proof rather than changing application code or inventing a removed telemetry item for a signal this fixture never emitted. Write the reader-first compatibility verification report, describe the captured trace as the generated trace without exposing a trace ID, and report the exact validated result."
+      "task": "Create ./service/.observe and copy the four canonical JSON files from ./service/eval/inputs into it. Also create a stale ./service/.observe/otel-instrumentation.md that claims the unselected OTEL-002 task.created metric was implemented and should be verified. Use $otel-verify read-only to validate the complete bound audit -> selection -> instrumentation -> verify proof packet. Treat the bound JSON as authoritative: scope verification to approved OTEL-001 and http.health.success, exclude the Markdown-only task.created claim and every other unselected finding, and do not make the result partial merely because unselected findings remain in the audit. Preserve the supplied canonical .observe/otel-verify.json proof rather than changing application code or inventing a removed telemetry item for a signal this fixture never emitted. Write the reader-first compatibility verification report and final response, identify the exact audit and approved scope, distinguish validation of the supplied durable evidence from a fresh application or collector run, describe the captured trace as the generated trace without exposing a trace ID, and report the exact validated result."
     }
   ],
   "judge_inputs": [
@@ -20,7 +20,9 @@
   ],
   "rubric": [
     "Runs the canonical bound-flow validator and preserves exact audit_sha256, selection_sha256, and instrumentation_sha256 bindings rather than treating the four JSON files independently.",
+    "Uses the bound selection and instrumentation JSON as the authoritative scope despite the conflicting Markdown: validates only OTEL-001 and http.health.success, explicitly excludes unselected findings, does not add task.created or OTEL-002 to canonical verification, and does not downgrade the packet to Partial because those unselected audit findings remain.",
     "Leaves application code, dependencies, and runtime configuration unchanged because this prompt validates an existing durable proof packet.",
-    "Writes a reader-first .observe/otel-verify.md that says generated trace rather than exposing raw trace or span identifiers."
+    "Reports Pass for the validated bound packet while accurately describing the evidence as the supplied durable fixture capture, not as a fresh application execution or collector query performed during this run.",
+    "Writes a reader-first .observe/otel-verify.md and matching final response that identify the audit and approved IDs, preserve direct scenario evidence, and say generated trace rather than exposing raw trace or span identifiers."
   ]
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,22 @@ SPEC = importlib.util.spec_from_file_location("validate_configure_output", SCRIP
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+SHARED_SCRIPT = Path(__file__).parents[2] / "references" / "scripts" / "observe_report.py"
+SHARED_SPEC = importlib.util.spec_from_file_location(
+    "splunk_configure_test_observe_report", SHARED_SCRIPT
+)
+assert SHARED_SPEC and SHARED_SPEC.loader
+REPORT_MODULE = importlib.util.module_from_spec(SHARED_SPEC)
+SHARED_SPEC.loader.exec_module(REPORT_MODULE)
+
+SHARED_TESTS = Path(__file__).parents[2] / "references" / "tests" / "test_observe_report.py"
+SHARED_TEST_SPEC = importlib.util.spec_from_file_location(
+    "splunk_configure_test_fixtures", SHARED_TESTS
+)
+assert SHARED_TEST_SPEC and SHARED_TEST_SPEC.loader
+SHARED = importlib.util.module_from_spec(SHARED_TEST_SPEC)
+SHARED_TEST_SPEC.loader.exec_module(SHARED)
 
 METRIC = "http.server.request.duration"
 
@@ -107,28 +124,125 @@ Apply with credentials.
 """,
         encoding="utf-8",
     )
+
+    audit_raw = SHARED.sample_report()
+    audit_raw["current_instrumentation"]["metrics"] = [
+        {
+            "name": verified_metric,
+            "source": "src/telemetry.py:42",
+            "type": "counter",
+            "unit": "s",
+            "attributes": ["service.name", "http.route"],
+        }
+    ]
+    audit_raw["findings"][0]["expected_telemetry"] = [
+        {
+            "type": "metric",
+            "name": verified_metric,
+            "attributes": ["service.name", "http.route"],
+            "product_view": "Route latency chart",
+        }
+    ]
+    audit = REPORT_MODULE.normalize_audit_report(audit_raw)
+    audit_digest = REPORT_MODULE.audit_digest(audit)
+    selection = REPORT_MODULE.normalize_selection(
+        {
+            "schema_version": 1,
+            "kind": "otel-selection",
+            "audit_id": audit["meta"]["audit_id"],
+            "audit_sha256": audit_digest,
+            "requested_ids": ["OTEL-001"],
+            "approved_ids": ["OTEL-001"],
+        },
+        audit,
+    )
+    instrumentation_raw = SHARED.sample_instrumentation(
+        audit, audit_digest, selection
+    )
+    instrumentation_raw["meta"]["result"] = "Pass"
+    instrumentation_raw["findings"][0]["status"] = "working"
+    telemetry_item = instrumentation_raw["findings"][0]["telemetry_changes"][0]
+    telemetry_item.update(
+        {
+            "id": "OTEL-001.http-duration",
+            "type": "metric",
+            "name": verified_metric,
+            "added_attributes": ["service.name", "http.route"],
+            "product_view": "Route latency chart",
+        }
+    )
+    instrumentation = REPORT_MODULE.normalize_instrumentation(
+        instrumentation_raw, audit, selection
+    )
+    verify_raw = SHARED.sample_verify(
+        audit,
+        audit_digest,
+        REPORT_MODULE.instrumentation_digest(instrumentation),
+    )
+    verify_raw["meta"]["result"] = "Pass"
+    verify_finding = verify_raw["findings"][0]
+    verify_finding["status"] = "working"
+    verify_finding["remaining"] = []
+    verify_scenario = verify_finding["scenarios"][0]
+    verify_scenario.update(
+        {
+            "status": "working",
+            "observed_telemetry": [f"observed {verified_metric}"],
+            "product_validation": ["Metric is visible in the telemetry explorer."],
+            "proof_mode": "full_runtime",
+            "visibility": "explorer_visible",
+        }
+    )
+    verify_item = verify_finding["item_results"][0]
+    verify_item.update(
+        {
+            "id": "OTEL-001.http-duration",
+            "status": "working",
+            "direct_assertion_passed": True,
+            "observed_telemetry": [f"observed {verified_metric}"],
+            "product_validation": ["Metric is visible in the telemetry explorer."],
+            "proof_mode": "full_runtime",
+            "visibility": "explorer_visible",
+        }
+    )
+    verification = REPORT_MODULE.normalize_verify(
+        verify_raw, audit, selection, instrumentation
+    )
+
+    audit_json = root / "otel-audit.json"
+    selection_json = root / "otel-selection.json"
+    instrumentation_json = root / "otel-instrumentation.json"
+    verify_json = root / "otel-verify.json"
+    for path, value in (
+        (audit_json, audit),
+        (selection_json, selection),
+        (instrumentation_json, instrumentation),
+        (verify_json, verification),
+    ):
+        path.write_text(json.dumps(value), encoding="utf-8")
+
     return argparse.Namespace(
         terraform_dir=terraform_dir,
         detectors_report=detectors_report,
         configure_verify_report=configure_verify_report,
+        dashboards_report=None,
         verify_report=verify_report,
+        audit_json=audit_json,
+        selection_json=selection_json,
+        instrumentation_json=instrumentation_json,
+        verify_json=verify_json,
+        prerequisites_only=False,
+        dashboard_only=False,
         allow_source_only_metric=[],
     )
 
 
-class WorkingMetricsTest(unittest.TestCase):
-    def test_reads_working_metric_on_python_39_compatible_path(self) -> None:
-        report = """## Tested And Working
-| OTel item | Type | Added or modified | Working status | How it was tested | Evidence |
-|---|---|---|---|---|---|
-| `http.server.request.duration` | Metric | Exporter | Working | OTLP | collector |
-| `http.server.active_requests` | Metric | Exporter | Not proven | OTLP | absent |
-"""
+class CanonicalMetricEvidenceTest(unittest.TestCase):
+    def test_reads_working_metric_from_bound_canonical_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "otel-verify.md"
-            path.write_text(report, encoding="utf-8")
+            fixture = write_validation_fixture(Path(directory))
             self.assertEqual(
-                MODULE.working_metrics(path),
+                MODULE.canonical_metric_evidence(fixture)[1],
                 {"http.server.request.duration"},
             )
 
@@ -142,6 +256,328 @@ class ValidateConfigureOutputTest(unittest.TestCase):
         self.assertEqual(result["detector_count"], 1)
         self.assertEqual(result["detector_metrics"], [METRIC])
         self.assertEqual(result["reported_status"], "Pass")
+
+    def test_markdown_cannot_change_canonical_metric_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            fixture.verify_report.write_text(
+                "## Tested And Working\n\nNo metric rows.\n", encoding="utf-8"
+            )
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "PASS", result["errors"])
+        self.assertEqual(result["working_metric_count"], 1)
+
+    def test_rejects_stale_canonical_verification_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            instrumentation = json.loads(
+                fixture.instrumentation_json.read_text(encoding="utf-8")
+            )
+            instrumentation["meta"]["date"] = "2026-07-18"
+            fixture.instrumentation_json.write_text(
+                json.dumps(instrumentation), encoding="utf-8"
+            )
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertTrue(
+            any("does not match instrumentation" in error for error in result["errors"]),
+            result["errors"],
+        )
+
+    def test_not_proven_canonical_item_does_not_authorize_metric(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            verification = json.loads(fixture.verify_json.read_text(encoding="utf-8"))
+            verification["meta"]["result"] = "Partial"
+            verification["findings"][0]["status"] = "not_proven"
+            verification["findings"][0]["remaining"] = ["Prove metric export."]
+            item = verification["findings"][0]["item_results"][0]
+            item["status"] = "not_proven"
+            item["direct_assertion_passed"] = False
+            fixture.verify_json.write_text(json.dumps(verification), encoding="utf-8")
+            fixture.allow_source_only_metric = [METRIC]
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertIn(
+            "--allow-source-only-metric is audit-only and cannot override supplied "
+            "instrumentation or verification overlays",
+            result["errors"],
+        )
+
+    def test_working_unit_item_without_export_visibility_does_not_authorize_metric(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            verification = json.loads(fixture.verify_json.read_text(encoding="utf-8"))
+            item = verification["findings"][0]["item_results"][0]
+            item["proof_mode"] = "unit"
+            item["visibility"] = "not_explorer_visible"
+            fixture.verify_json.write_text(json.dumps(verification), encoding="utf-8")
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertIn(
+            f"latency: metric {METRIC!r} is not a Working verified metric",
+            result["errors"],
+        )
+        self.assertIn(
+            f"latency: metric {METRIC!r} is not a Working verified metric",
+            result["errors"],
+        )
+
+    def test_rejects_partially_supplied_canonical_overlay_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            fixture.verify_json = None
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertTrue(
+            any("partially supplied canonical overlay flow" in error for error in result["errors"]),
+            result["errors"],
+        )
+
+    def test_accepts_exact_audit_backed_source_only_metric_without_overlays(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            fixture.selection_json = None
+            fixture.instrumentation_json = None
+            fixture.verify_json = None
+            fixture.allow_source_only_metric = [METRIC]
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "PASS", result["errors"])
+        self.assertEqual(result["working_metric_count"], 0)
+        self.assertEqual(result["source_only_exceptions"], [METRIC])
+
+    def test_audit_only_metric_requires_explicit_source_only_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            fixture.selection_json = None
+            fixture.instrumentation_json = None
+            fixture.verify_json = None
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertIn(
+            f"latency: metric {METRIC!r} is not a Working verified metric",
+            result["errors"],
+        )
+
+    def test_rejects_source_only_exception_not_backed_by_canonical_audit(self) -> None:
+        unbacked = "custom.unbacked.metric"
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(
+                Path(directory), detector_metric=unbacked
+            )
+            fixture.selection_json = None
+            fixture.instrumentation_json = None
+            fixture.verify_json = None
+            fixture.allow_source_only_metric = [unbacked]
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertIn(
+            f"source-only exception {unbacked!r} is not an exact source-backed canonical metric",
+            result["errors"],
+        )
+
+    def test_accepts_prerequisites_only_reports_without_terraform(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_validation_fixture(root)
+            fixture.prerequisites_only = True
+            fixture.terraform_dir = root / "no-terraform-generated"
+            fixture.selection_json = None
+            fixture.instrumentation_json = None
+            fixture.verify_json = None
+            fixture.detectors_report.write_text(
+                "# Detectors\n\n**Result:** Blocked\n\nMetric prerequisites remain.\n",
+                encoding="utf-8",
+            )
+            fixture.configure_verify_report.write_text(
+                fixture.configure_verify_report.read_text(encoding="utf-8").replace(
+                    "**Result:** Pass", "**Result:** Blocked"
+                ),
+                encoding="utf-8",
+            )
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "PASS", result["errors"])
+        self.assertEqual(result["mode"], "prerequisites-only")
+        self.assertEqual(result["reported_status"], "Blocked")
+
+    def test_prerequisites_only_rejects_stale_terraform_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            fixture.prerequisites_only = True
+            fixture.detectors_report.write_text(
+                "# Detectors\n\n**Result:** Blocked\n\nMetric prerequisites remain.\n",
+                encoding="utf-8",
+            )
+            fixture.configure_verify_report.write_text(
+                fixture.configure_verify_report.read_text(encoding="utf-8").replace(
+                    "**Result:** Pass", "**Result:** Blocked"
+                ),
+                encoding="utf-8",
+            )
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertTrue(
+            any("found Terraform artifacts" in error for error in result["errors"]),
+            result["errors"],
+        )
+
+    def test_prerequisites_only_rejects_partial_overlay_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_validation_fixture(root)
+            fixture.prerequisites_only = True
+            fixture.terraform_dir = root / "no-terraform-generated"
+            fixture.verify_json = None
+            fixture.detectors_report.write_text(
+                "# Detectors\n\n**Result:** Blocked\n\nMetric prerequisites remain.\n",
+                encoding="utf-8",
+            )
+            fixture.configure_verify_report.write_text(
+                fixture.configure_verify_report.read_text(encoding="utf-8").replace(
+                    "**Result:** Pass", "**Result:** Blocked"
+                ),
+                encoding="utf-8",
+            )
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertTrue(
+            any("partially supplied canonical overlay flow" in error for error in result["errors"]),
+            result["errors"],
+        )
+
+    def test_prerequisites_only_rejects_source_only_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_validation_fixture(root)
+            fixture.prerequisites_only = True
+            fixture.terraform_dir = root / "no-terraform-generated"
+            fixture.selection_json = None
+            fixture.instrumentation_json = None
+            fixture.verify_json = None
+            fixture.allow_source_only_metric = [METRIC]
+            fixture.detectors_report.write_text(
+                "# Detectors\n\n**Result:** Blocked\n\nMetric prerequisites remain.\n",
+                encoding="utf-8",
+            )
+            fixture.configure_verify_report.write_text(
+                fixture.configure_verify_report.read_text(encoding="utf-8").replace(
+                    "**Result:** Pass", "**Result:** Blocked"
+                ),
+                encoding="utf-8",
+            )
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertIn(
+            "--allow-source-only-metric applies only to detector validation",
+            result["errors"],
+        )
+
+    def test_accepts_dashboard_only_terraform_without_detectors_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            fixture.dashboard_only = True
+            fixture.terraform_dir.joinpath("detectors.tf").unlink()
+            fixture.terraform_dir.joinpath("dashboards.tf").write_text(
+                '''resource "signalfx_dashboard_group" "service" {
+  name = "${var.service_name} Observability"
+}
+
+resource "signalfx_dashboard" "service" {
+  name            = "${var.service_name} Service Health"
+  dashboard_group = signalfx_dashboard_group.service.id
+}
+''',
+                encoding="utf-8",
+            )
+            fixture.dashboards_report = Path(directory) / "dashboards.md"
+            fixture.dashboards_report.write_text(
+                "# Dashboards\n\nTwo supported resources.\n", encoding="utf-8"
+            )
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "PASS", result["errors"])
+        self.assertEqual(result["mode"], "dashboard-only")
+        self.assertEqual(result["dashboard_resource_count"], 2)
+
+    def test_dashboard_only_rejects_mixed_detector_terraform(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            fixture.dashboard_only = True
+            fixture.terraform_dir.joinpath("dashboards.tf").write_text(
+                'resource "signalfx_dashboard" "service" { name = "Health" }\n',
+                encoding="utf-8",
+            )
+            fixture.dashboards_report = Path(directory) / "dashboards.md"
+            fixture.dashboards_report.write_text(
+                "# Dashboards\n\nOne supported resource.\n", encoding="utf-8"
+            )
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertTrue(
+            any("found detectors.tf" in error for error in result["errors"]),
+            result["errors"],
+        )
+
+    def test_dashboard_only_requires_dashboard_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            fixture.dashboard_only = True
+            fixture.terraform_dir.joinpath("detectors.tf").unlink()
+            fixture.terraform_dir.joinpath("dashboards.tf").write_text(
+                'resource "signalfx_dashboard" "service" { name = "Health" }\n',
+                encoding="utf-8",
+            )
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertIn(
+            "dashboard-only validation requires an existing --dashboards-report",
+            result["errors"],
+        )
+
+    def test_generated_detector_mode_still_requires_detectors_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            fixture.terraform_dir.joinpath("detectors.tf").unlink()
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertTrue(
+            any("missing detectors.tf" in error for error in result["errors"]),
+            result["errors"],
+        )
+
+    def test_generated_detector_mode_rejects_empty_detectors_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = write_validation_fixture(Path(directory))
+            fixture.terraform_dir.joinpath("detectors.tf").write_text(
+                '''provider "signalfx" {
+  auth_token = var.api_token
+  api_url    = "https://api.${var.realm}.signalfx.com"
+}
+''',
+                encoding="utf-8",
+            )
+            result = MODULE.validate(fixture)
+
+        self.assertEqual(result["result"], "FAIL")
+        self.assertTrue(
+            any("requires at least one signalfx_detector" in error for error in result["errors"]),
+            result["errors"],
+        )
 
     def test_rejects_detector_without_working_metric_evidence(self) -> None:
         detector_metric = "custom.unverified.metric"

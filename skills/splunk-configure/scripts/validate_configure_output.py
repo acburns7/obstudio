@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
-"""Validate generated Splunk detector Terraform against verified metrics."""
+"""Validate Splunk configure detector, dashboard-only, or report-only output.
+
+Detector metrics are authorized from canonical audit/overlay JSON. Dashboard
+mode validates canonical provenance plus report/base/resource presence, and
+prerequisites-only mode validates Blocked reports without Terraform artifacts.
+"""
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
 from pathlib import Path
+from types import ModuleType
 
 
 RESOURCE_START = re.compile(r'resource\s+"signalfx_detector"\s+"([^"]+)"\s*\{')
+DASHBOARD_RESOURCE_START = re.compile(
+    r'resource\s+"signalfx_(?:dashboard|dashboard_group|time_chart|single_value_chart|list_chart|table_chart)"\s+"[^"]+"\s*\{'
+)
 VARIABLE_DECLARATION = re.compile(r'variable\s+"([^"]+)"\s*\{')
 VARIABLE_REFERENCE = re.compile(r"\bvar\.([A-Za-z_][A-Za-z0-9_]*)")
 # HCL identifiers (attribute names and heredoc delimiters) permit hyphens, so
@@ -26,7 +36,6 @@ DATA_CALL = re.compile(r"\bdata\(")
 DATA_METRIC = re.compile(r"\bdata\(\s*['\"]([^'\"]+)['\"]\s*(?=,|\))")
 AGG_METHOD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 DETECT_LABEL = re.compile(r'detect_label\s*=\s*"([^"]+)"')
-BACKTICK = re.compile(r"`([^`]+)`")
 PROVIDER_START = re.compile(r'provider\s+"signalfx"\s*\{')
 REPORT_STATUS = re.compile(r"^\*\*Result:\*\*\s*(Pass|Partial|Fail|Blocked)\s*$", re.I | re.M)
 CONFIGURE_VERIFY_HEADINGS = (
@@ -43,40 +52,101 @@ FORBIDDEN_PROGRAM_PATTERNS = {
 }
 
 
-def markdown_cells(line: str) -> list[str]:
-    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+def load_shared_report_module() -> ModuleType:
+    shared = (
+        Path(__file__).resolve().parents[2]
+        / "references"
+        / "scripts"
+        / "observe_report.py"
+    )
+    if not shared.is_file():
+        raise ValueError(f"shared canonical flow validator is missing: {shared}")
+    spec = importlib.util.spec_from_file_location(
+        "splunk_configure_observe_report", shared
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot load shared canonical flow validator: {shared}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def working_metrics(report: Path) -> set[str]:
-    if not report.exists():
-        return set()
-    lines = report.read_text(encoding="utf-8").splitlines()
-    in_section = False
-    header: list[str] | None = None
-    metrics: set[str] = set()
-    for line in lines:
-        if line.startswith("## "):
-            in_section = line.strip() == "## Tested And Working"
-            header = None
-            continue
-        if not in_section or not line.lstrip().startswith("|"):
-            continue
-        cells = markdown_cells(line)
-        if header is None and "OTel item" in cells and "Working status" in cells:
-            header = cells
-            continue
-        if header is None or set(cells) <= {"---", "--"} or len(cells) != len(header):
-            continue
-        # Column counts are checked above; avoid Python 3.10-only zip(strict=...).
-        row = dict(zip(header, cells))
-        if row.get("Working status") != "Working" or not re.match(
-            r"^metric\b", row.get("Type", ""), re.I
-        ):
-            continue
-        item = row["OTel item"]
-        tokens = BACKTICK.findall(item)
-        metrics.add(tokens[0] if tokens else item.strip())
-    return metrics
+def canonical_metric_evidence(
+    args: argparse.Namespace,
+) -> tuple[set[str], set[str]]:
+    """Return source-backed and directly verified metric names.
+
+    The shared normalizer validates the complete audit -> selection ->
+    instrumentation -> verification binding, including every normalized digest.
+    A metric is working only when its exact instrumentation item has a working
+    direct assertion and OTLP-accepted or Explorer-visible delivery in the
+    bound verification overlay. Markdown is deliberately absent from this
+    authorization path.
+    """
+    audit_path: Path | None = getattr(args, "audit_json", None)
+    if audit_path is None or not audit_path.is_file():
+        raise ValueError(
+            "canonical validation requires an existing --audit-json artifact"
+        )
+    module = load_shared_report_module()
+    audit = module.normalize_audit_report(module.load_json(audit_path))
+    source_backed = {
+        row["name"]
+        for row in audit["current_instrumentation"]["metrics"]
+        if isinstance(row.get("name"), str)
+    }
+
+    selection_path: Path | None = getattr(args, "selection_json", None)
+    instrumentation_path: Path | None = getattr(args, "instrumentation_json", None)
+    verify_path: Path | None = getattr(args, "verify_json", None)
+    supplied = [selection_path, instrumentation_path, verify_path]
+    if not any(supplied):
+        return source_backed, set()
+    missing = [
+        option
+        for option, path in (
+            ("--selection-json", selection_path),
+            ("--instrumentation-json", instrumentation_path),
+            ("--verify-json", verify_path),
+        )
+        if path is None or not path.is_file()
+    ]
+    if missing:
+        raise ValueError(
+            "a partially supplied canonical overlay flow requires existing "
+            + ", ".join(missing)
+            + "; Markdown cannot authorize metrics"
+        )
+
+    selection, instrumentation, verification = module.load_flow(
+        audit,
+        selection_path,
+        instrumentation_path,
+        verify_path,
+    )
+    if instrumentation is None or verification is None:
+        raise ValueError(
+            "canonical detector validation requires bound instrumentation and "
+            "verification overlays"
+        )
+
+    instrumentation_items = {
+        item["id"]: item
+        for finding in instrumentation["findings"]
+        for item in finding["telemetry_changes"]
+        if item["type"] == "metric" and item["change_kind"] != "removed"
+    }
+    source_backed.update(item["name"] for item in instrumentation_items.values())
+    verified = {
+        instrumentation_items[item["id"]]["name"]
+        for finding in verification["findings"]
+        for item in finding["item_results"]
+        if item["id"] in instrumentation_items
+        and item["status"] == "working"
+        and item["direct_assertion_passed"]
+        and item["visibility"] in {"otlp_accepted", "explorer_visible"}
+    }
+    return source_backed, verified
 
 
 def matching_brace(text: str, opening: int) -> int:
@@ -982,26 +1052,70 @@ def validate_heading_order(text: str, name: str, errors: list[str]) -> None:
         errors.append(f"{name}: reader-first headings are out of order")
 
 
+def validate_base_terraform(
+    variables_text: str,
+    tfvars_text: str,
+    gitignore_text: str,
+    errors: list[str],
+) -> set[str]:
+    variables_structural = _blank_hcl_string_values(_blank_comment_lines(variables_text))
+    declared = set(VARIABLE_DECLARATION.findall(variables_structural))
+    if "api_token" not in declared:
+        errors.append("variables.tf does not declare sensitive api_token")
+    if "realm" not in declared:
+        errors.append("variables.tf does not declare realm")
+
+    api_token_header = re.search(r'variable\s+"api_token"\s*\{', variables_structural)
+    api_token_block = None
+    if api_token_header is not None:
+        try:
+            block_end = matching_brace(variables_structural, api_token_header.end() - 1)
+        except ValueError:
+            block_end = None
+        if block_end is not None:
+            api_token_block = variables_structural[api_token_header.start() : block_end + 1]
+    if api_token_block is None or not re.search(
+        r"^\s*sensitive\s*=\s*true[ \t]*$", api_token_block, re.M
+    ):
+        errors.append("api_token variable is not marked sensitive")
+    if not re.search(r'^\s*api_token\s*=\s*""\s*(?:#.*)?$', tfvars_text, re.M):
+        errors.append("terraform.tfvars.example must leave api_token empty")
+    ignore_lines = {
+        line.strip()
+        for line in gitignore_text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    for required_ignore in {".terraform/", "*.tfstate", "*.tfstate.*", "terraform.tfvars"}:
+        if required_ignore not in ignore_lines:
+            errors.append(f".gitignore does not exclude {required_ignore!r}")
+    return declared
+
+
 def validate(args: argparse.Namespace) -> dict[str, object]:
-    terraform_dir: Path = args.terraform_dir
-    required = {
-        "detectors.tf": terraform_dir / "detectors.tf",
-        "variables.tf": terraform_dir / "variables.tf",
-        "terraform.tfvars.example": terraform_dir / "terraform.tfvars.example",
-        ".gitignore": terraform_dir / ".gitignore",
+    prerequisites_only = bool(getattr(args, "prerequisites_only", False))
+    dashboard_only = bool(getattr(args, "dashboard_only", False))
+    terraform_dir: Path | None = getattr(args, "terraform_dir", None)
+    if prerequisites_only and dashboard_only:
+        return {
+            "result": "FAIL",
+            "errors": ["--prerequisites-only and --dashboard-only are mutually exclusive"],
+        }
+    required_reports = {
         "detectors report": args.detectors_report,
         "configure verification report": args.configure_verify_report,
     }
-    errors = [f"missing {name}: {path}" for name, path in required.items() if not path.is_file()]
+    errors = [
+        f"missing {name}: {path}"
+        for name, path in required_reports.items()
+        if not path.is_file()
+    ]
     if errors:
         return {"result": "FAIL", "errors": errors}
 
-    detectors_text = required["detectors.tf"].read_text(encoding="utf-8")
-    variables_text = required["variables.tf"].read_text(encoding="utf-8")
-    tfvars_text = required["terraform.tfvars.example"].read_text(encoding="utf-8")
-    gitignore_text = required[".gitignore"].read_text(encoding="utf-8")
-    report_text = required["detectors report"].read_text(encoding="utf-8")
-    configure_verify_text = required["configure verification report"].read_text(encoding="utf-8")
+    report_text = required_reports["detectors report"].read_text(encoding="utf-8")
+    configure_verify_text = required_reports["configure verification report"].read_text(
+        encoding="utf-8"
+    )
     detector_status = report_status(report_text, "detectors report", errors)
     configure_status = report_status(configure_verify_text, "configure verification report", errors)
     if detector_status is not None and configure_status is not None and detector_status != configure_status:
@@ -1010,24 +1124,133 @@ def validate(args: argparse.Namespace) -> dict[str, object]:
             f"{detector_status} != {configure_status}"
         )
     validate_heading_order(configure_verify_text, "configure verification report", errors)
+
+    try:
+        source_backed, verified = canonical_metric_evidence(args)
+    except (OSError, ValueError) as error:
+        source_backed, verified = set(), set()
+        errors.append(f"canonical metric evidence is invalid: {error}")
+
+    if prerequisites_only:
+        if args.allow_source_only_metric:
+            errors.append(
+                "--allow-source-only-metric applies only to detector validation"
+            )
+        if configure_status is not None and configure_status != "Blocked":
+            errors.append(
+                "prerequisites-only validation requires both reports to use Result: Blocked"
+            )
+        if terraform_dir is not None and terraform_dir.is_dir():
+            terraform_artifacts = sorted(terraform_dir.iterdir())
+            if terraform_artifacts:
+                errors.append(
+                    "prerequisites-only validation found Terraform artifacts: "
+                    + ", ".join(str(path) for path in terraform_artifacts)
+                )
+        return {
+            "result": "PASS" if not errors else "FAIL",
+            "mode": "prerequisites-only",
+            "detector_count": 0,
+            "detector_metrics": [],
+            "working_metric_count": 0,
+            "reported_status": configure_status,
+            "source_only_exceptions": [],
+            "errors": errors,
+        }
+
+    if terraform_dir is None:
+        errors.append("generated-resource validation requires --terraform-dir")
+        return {"result": "FAIL", "errors": errors}
+
+    required_terraform = {
+        "variables.tf": terraform_dir / "variables.tf",
+        "terraform.tfvars.example": terraform_dir / "terraform.tfvars.example",
+        ".gitignore": terraform_dir / ".gitignore",
+    }
+    resource_file = "dashboards.tf" if dashboard_only else "detectors.tf"
+    required_terraform[resource_file] = terraform_dir / resource_file
+    missing_terraform = [
+        f"missing {name}: {path}"
+        for name, path in required_terraform.items()
+        if not path.is_file()
+    ]
+    if missing_terraform:
+        return {"result": "FAIL", "errors": errors + missing_terraform}
+
+    variables_text = required_terraform["variables.tf"].read_text(encoding="utf-8")
+    tfvars_text = required_terraform["terraform.tfvars.example"].read_text(
+        encoding="utf-8"
+    )
+    gitignore_text = required_terraform[".gitignore"].read_text(encoding="utf-8")
+    declared = validate_base_terraform(
+        variables_text, tfvars_text, gitignore_text, errors
+    )
+
+    if dashboard_only:
+        dashboards_report: Path | None = getattr(args, "dashboards_report", None)
+        if dashboards_report is None or not dashboards_report.is_file():
+            errors.append(
+                "dashboard-only validation requires an existing --dashboards-report"
+            )
+        stale_detectors = terraform_dir / "detectors.tf"
+        if stale_detectors.is_file():
+            errors.append(
+                "dashboard-only validation found detectors.tf; use generated-resource "
+                "validation for mixed detector and dashboard Terraform"
+            )
+        dashboards_text = required_terraform["dashboards.tf"].read_text(encoding="utf-8")
+        dashboard_searchable = _blank_hcl_string_values(
+            _blank_comment_lines(dashboards_text)
+        )
+        dashboard_count = len(DASHBOARD_RESOURCE_START.findall(dashboard_searchable))
+        if dashboard_count == 0:
+            errors.append("dashboards.tf contains no supported Splunk dashboard resources")
+        if args.allow_source_only_metric:
+            errors.append(
+                "--allow-source-only-metric applies to detector authorization, not dashboard-only validation"
+            )
+        return {
+            "result": "PASS" if not errors else "FAIL",
+            "mode": "dashboard-only",
+            "detector_count": 0,
+            "dashboard_resource_count": dashboard_count,
+            "working_metric_count": len(verified),
+            "reported_status": configure_status,
+            "source_only_exceptions": [],
+            "errors": errors,
+        }
+
+    detectors_text = required_terraform["detectors.tf"].read_text(encoding="utf-8")
     try:
         blocks = detector_blocks(detectors_text)
     except ValueError as error:
         errors.append(f"detectors.tf: malformed signalfx_detector block ({error})")
         return {"result": "FAIL", "errors": errors}
     ids = [resource_id for resource_id, _ in blocks]
+    if not blocks:
+        errors.append(
+            "detector validation requires at least one signalfx_detector; use "
+            "--dashboard-only or --prerequisites-only for zero-detector output"
+        )
     if len(ids) != len(set(ids)):
         errors.append("duplicate signalfx_detector resource identifiers")
 
-    # Discover variable declarations on a comment- and string-blanked view so a
-    # commented-out `# variable "realm" {` or a `variable "..." {`-shaped string
-    # value cannot poison the `declared` set -- otherwise a variable that is not
-    # really declared would satisfy the `var.<name>` reference checks and the
-    # api_token/realm presence checks below.
-    variables_searchable = _blank_hcl_string_values(_blank_comment_lines(variables_text))
-    declared = set(VARIABLE_DECLARATION.findall(variables_searchable))
-    verified = working_metrics(args.verify_report)
-    allowed = verified | set(args.allow_source_only_metric)
+    source_only = set(args.allow_source_only_metric)
+    overlay_supplied = any(
+        getattr(args, name, None)
+        for name in ("selection_json", "instrumentation_json", "verify_json")
+    )
+    if source_only and overlay_supplied:
+        errors.append(
+            "--allow-source-only-metric is audit-only and cannot override supplied "
+            "instrumentation or verification overlays"
+        )
+    audit_only_source = set() if overlay_supplied else source_only
+    for metric in sorted(audit_only_source - source_backed):
+        errors.append(
+            f"source-only exception {metric!r} is not an exact source-backed canonical metric"
+        )
+    allowed = verified | (audit_only_source & source_backed)
     detector_metrics: list[str] = []
     detector_signatures: list[tuple[str, str | None, str]] = []
 
@@ -1122,10 +1345,6 @@ def validate(args: argparse.Namespace) -> dict[str, object]:
             "filters (true duplicate; a route-group merge must use a distinct aggregation "
             "or filter on distinct attributes)"
         )
-    if "api_token" not in declared:
-        errors.append("variables.tf does not declare sensitive api_token")
-    if "realm" not in declared:
-        errors.append("variables.tf does not declare realm")
     # Mask every string value except `api_url`, whose real quoted value the
     # credential check below must still read. On this view the only `auth_token`
     # / `api_url` text that survives is a genuine top-level attribute: an
@@ -1156,38 +1375,6 @@ def validate(args: argparse.Namespace) -> dict[str, object]:
                 errors.append("signalfx provider must use var.api_token")
             if not re.search(r'^\s*api_url\s*=\s*"https://api\.\$\{var\.realm\}\.(?:signalfx\.com|observability\.splunk\.com)"[ \t]*$', provider, re.M):
                 errors.append("signalfx provider api_url must derive from var.realm")
-    # Mask string values before checking `sensitive = true`: otherwise the
-    # DOTALL block scan walks into a `description = "... set sensitive = true
-    # ..."` value and matches the flag inside prose, so a variable that is not
-    # actually sensitive passes. On the masked view only a real unquoted
-    # `sensitive = true` attribute (anchored to its own line) survives.
-    variables_structural = _blank_hcl_string_values(_blank_comment_lines(variables_text))
-    # Bound the api_token block with the brace matcher rather than a `\n}`
-    # regex: an indented closing brace or a CRLF `\r\n}` would otherwise let the
-    # block scan bleed into a later variable declaration, where a `sensitive =
-    # true` on an unrelated variable could falsely satisfy the check.
-    api_token_header = re.search(r'variable\s+"api_token"\s*\{', variables_structural)
-    api_token_block = None
-    if api_token_header is not None:
-        try:
-            block_end = matching_brace(variables_structural, api_token_header.end() - 1)
-        except ValueError:
-            block_end = None
-        if block_end is not None:
-            api_token_block = variables_structural[api_token_header.start() : block_end + 1]
-    if api_token_block is None or not re.search(
-        r"^\s*sensitive\s*=\s*true[ \t]*$", api_token_block, re.M
-    ):
-        errors.append("api_token variable is not marked sensitive")
-    if not re.search(r'^\s*api_token\s*=\s*""\s*(?:#.*)?$', tfvars_text, re.M):
-        errors.append("terraform.tfvars.example must leave api_token empty")
-    ignore_lines = {
-        line.strip() for line in gitignore_text.splitlines() if line.strip() and not line.lstrip().startswith("#")
-    }
-    for required_ignore in {".terraform/", "*.tfstate", "*.tfstate.*", "terraform.tfvars"}:
-        if required_ignore not in ignore_lines:
-            errors.append(f".gitignore does not exclude {required_ignore!r}")
-
     return {
         "result": "PASS" if not errors else "FAIL",
         "detector_count": len(blocks),
@@ -1200,11 +1387,35 @@ def validate(args: argparse.Namespace) -> dict[str, object]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--terraform-dir", type=Path, required=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--terraform-dir",
+        type=Path,
+        default=Path(".observe/terraform"),
+    )
     parser.add_argument("--detectors-report", type=Path, required=True)
     parser.add_argument("--configure-verify-report", type=Path, required=True)
-    parser.add_argument("--verify-report", type=Path, required=True)
+    parser.add_argument("--dashboards-report", type=Path)
+    parser.add_argument("--audit-json", type=Path, required=True)
+    parser.add_argument("--selection-json", type=Path)
+    parser.add_argument("--instrumentation-json", type=Path)
+    parser.add_argument("--verify-json", type=Path)
+    parser.add_argument(
+        "--verify-report",
+        type=Path,
+        help=argparse.SUPPRESS,
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--prerequisites-only",
+        action="store_true",
+        help="validate Blocked reports and canonical provenance without Terraform",
+    )
+    mode.add_argument(
+        "--dashboard-only",
+        action="store_true",
+        help="validate dashboard-only Terraform, report presence, and canonical provenance",
+    )
     parser.add_argument("--allow-source-only-metric", action="append", default=[])
     return parser.parse_args()
 

@@ -14,13 +14,43 @@ org-wide results; names vary across teams). Match on **structural identity**: th
 group name, the dashboard name + its panel-metric set, and per-chart
 `{ metric, filters, chartType }` read from the live `programText`/`charts[]`.
 
+## Failed or incomplete live inventory
+
+The GAP rules below apply only after every required live group, dashboard, and
+chart fetch succeeds. A failed fetch is not evidence that an object is absent.
+If any required live fetch fails or returns an unusable response, mark every
+local group, dashboard, and chart **UNCERTAIN** with the reason `complete live
+inventory unavailable; absence cannot be verified`. Do not fall back to GAP and
+do not send any Splunk write request (`POST`, `PUT`, or `DELETE`), including
+orphan-chart cleanup. Re-run after a complete live inventory is available.
+
+This includes pagination that continued after an HTTP 500: every skipped page
+makes the inventory incomplete, even if later pages succeed. Partial results are
+diagnostic only.
+
+## Conflict reclassification
+
+An HTTP 409/name race is not automatic coverage. Refresh the complete relevant
+inventory and required details, then rerun the applicable level below for the
+group, chart, or dashboard. Reuse an ID only for a fresh COVERED verdict;
+partial, ambiguous, or divergent content is UNCERTAIN and blocks dependent
+writes.
+
+For a dashboard POST race, first persist every chart created earlier in the run
+as an orphan candidate. After the dashboard refetch, record which candidates it
+references and retain the unreferenced charts under the orphan-recovery
+contract. Do not turn the confirmed POST into an implicit PUT or delete a
+redundant chart. Re-plan and obtain confirmation for new attach, reuse, or
+cleanup actions.
+
 ## Level 1 — Dashboard group
 
 A local `signalfx_dashboard_group` is:
 
 - **COVERED** when a live group has the same `name`. Reason:
   `matched live dashboard group "<name>" (id G-123): name match`.
-- **GAP** when no live group has that name. Reason:
+- **GAP** when a complete, successful live inventory has no group with that
+  name. Reason:
   `no live dashboard group named "<name>"; will create before its dashboards`.
 
 Groups are created first (a dashboard's `groupId` must reference an existing
@@ -33,7 +63,8 @@ A local `signalfx_dashboard` is:
 - **COVERED** when a live dashboard matches by `name` (within the matched group),
   AND its panel-metric set matches the local panel-metric set. Reason:
   `matched live dashboard "<name>" (id D-123): name match + N/N panel metrics present`.
-- **GAP** when no live dashboard with that name exists in the group. Reason:
+- **GAP** when a complete, successful live inventory has no dashboard with that
+  name in the group. Reason:
   `no live dashboard named "<name>" in group "<group>"; will create`.
 - **COVERED (with chart-level GAPs)** when a same-named live dashboard exists
   and every live panel title/label matches a local panel, but the live dashboard
@@ -72,8 +103,8 @@ A local chart is **COVERED** only when ALL hold for a single live chart:
 Reason (COVERED):
 `chart COVERED: metric http.server.request.duration + filter service.name=<svc> + type time_series all matched live chart C-456`.
 
-A local chart is **GAP** when no live chart in the matched dashboard satisfies all
-three. Reason:
+A local chart is **GAP** when a complete, successful live inventory has no chart
+in the matched dashboard that satisfies all three. Reason:
 `panel GAP: no live chart with metric=<m> + filter service.name=<svc> + type <t> in dashboard D-123; will create and add`.
 
 A local chart is **UNCERTAIN** when the metric matches a live chart but the

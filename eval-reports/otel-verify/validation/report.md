@@ -1,4 +1,4 @@
-# splunk-configure Codex Eval Validation Report
+# otel-verify Codex Eval Validation Report
 
 This report validates eval JSON, eval directory availability, and skill source availability. It does not run Codex execution.
 
@@ -8,8 +8,8 @@ This report validates eval JSON, eval directory availability, and skill source a
 |---|---|
 | Mode | validation |
 | Eval kind | validation |
-| Skill | splunk-configure |
-| Run ID | 20260817T172615429963Z |
+| Skill | otel-verify |
+| Run ID | 20260817T172615446811Z |
 | Workers | 1 |
 | Config | evals/codex-evals.validation.toml |
 
@@ -17,5 +17,4 @@ This report validates eval JSON, eval directory availability, and skill source a
 
 | Eval | Service | Prompts | Eval File | Sanity Checks | Rubric Checks | Runtime Checks |
 |---|---|---:|---|---:|---:|---:|
-| dashboards/checkout-configure/qual/configure | dashboards/checkout-configure | 1 | evals/dashboards/checkout-configure/eval/qual/configure.json | 0 | 9 | 0 |
-| sanity/skill-smoke/sanity/configure | sanity/skill-smoke | 2 | evals/sanity/skill-smoke/eval/sanity/configure.json | 0 | 0 | 0 |
+| go/chi-basic/qual/verify | go/chi-basic | 1 | evals/go/chi-basic/eval/qual/verify.json | 0 | 5 | 0 |

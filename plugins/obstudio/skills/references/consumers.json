@@ -9,11 +9,13 @@
   ],
   "genai-readiness.md": [
     "otel-audit",
-    "otel-instrument"
+    "otel-instrument",
+    "splunk-configure"
   ],
   "incident-readiness.md": [
     "otel-audit",
-    "otel-instrument"
+    "otel-instrument",
+    "splunk-configure"
   ],
   "ledger-template.md": [
     "splunk-dashboard-publish",
@@ -28,7 +30,8 @@
   "scripts/observe_report.py": [
     "otel-audit",
     "otel-instrument",
-    "otel-verify"
+    "otel-verify",
+    "splunk-configure"
   ],
   "signalflow-patterns.md": [
     "splunk-configure",

@@ -744,25 +744,36 @@ Detector generation should be proof-aware:
 
 - Read `.observe/otel-audit.json` for service metadata, gaps, GenAI readiness,
   and candidate metrics.
-- Read `.observe/otel-instrumentation.md` for implemented signal changes.
-- Read `.observe/otel-verify.md` for verified emitted metrics and OTLP proof.
+- When downstream work exists, load the bound `.observe/otel-selection.json`,
+  `.observe/otel-instrumentation.json`, and `.observe/otel-verify.json` as the
+  authoritative implementation and emitted-proof state. Validate their
+  canonical digests against the audit before using them.
+- Treat `.observe/otel-instrumentation.md` and `.observe/otel-verify.md` as
+  reader projections only; they never authorize Terraform by themselves.
 - Generate Terraform only for metrics that are present in source and either
   verified or explicitly accepted as source-only by the user.
 - Put missing or unverified detector inputs in
   `GenAI Instrumentation Prerequisites`, `Instrumentation Prerequisites`, or
   `Skipped Metrics`; do not invent detectors for absent metrics.
-- Always write `.observe/splunk-configure-verify.md`.
+- When accepted resources or recorded gaps/prerequisites produce configure
+  artifacts, write `.observe/detectors.md` and
+  `.observe/splunk-configure-verify.md`. A clean no-resource audit stops before
+  artifact generation.
 
 ## Splunk Configure Verification
 
-After generating Terraform, run local validation when tools are available:
+After producing configure artifacts, run local validation when tools are
+available:
 
 1. Confirm generated files exist:
-   - `.observe/terraform/detectors.tf`
-   - `.observe/terraform/variables.tf`
-   - `.observe/terraform/terraform.tfvars.example`
-   - `.observe/terraform/.gitignore`
    - `.observe/detectors.md`
+   - `.observe/splunk-configure-verify.md`
+   - `.observe/terraform/variables.tf`, `terraform.tfvars.example`, and
+     `.gitignore` only when at least one Terraform resource is generated
+   - `.observe/terraform/detectors.tf` only when accepted evidence supports at
+     least one detector
+   - `.observe/terraform/dashboards.tf` only when accepted evidence supports at
+     least one dashboard resource
 2. Run `terraform fmt -check -recursive .observe/terraform` when Terraform is
    installed.
 3. Run `terraform -chdir=.observe/terraform init -backend=false -input=false`
@@ -778,9 +789,11 @@ After generating Terraform, run local validation when tools are available:
 5. When approved detector-capable credentials are already available, run
    `terraform -chdir=.observe/terraform plan -refresh=false -input=false` to
    compile every detector through Splunk `/v2/detector/validate`. Do not apply.
-6. `Pass` requires local validation plus the authenticated plan. If local
-   checks pass but credentials are unavailable, use `Partial` and identify
-   remote SignalFlow compilation as unproven.
+6. For generated resources, `Pass` requires local validation plus the
+   authenticated plan. If local checks pass but credentials are unavailable,
+   use `Partial` and identify remote SignalFlow compilation as unproven. A
+   prerequisites-only run remains `Blocked`, even when its report contract is
+   valid, because there is no generated configuration to prove.
 7. `.observe/detectors.md` must inherit the exact result from
    `.observe/splunk-configure-verify.md` so the plan and proof reports cannot
    disagree.
