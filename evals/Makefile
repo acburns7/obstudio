@@ -128,6 +128,7 @@ test-interactive-guidance: ## Run interactive OTel workflow guidance tests
 		test_genai_skill_guidance.py \
 		test_incident_readiness_skill_guidance.py \
 		test_dashboard_skill_guidance.py \
+		test_agent_guideline_contracts.py \
 		--codex-eval-config "$(EVAL_VALIDATION_CONFIG)"
 
 eval-all: eval-validation eval-sanity eval-rubric eval-runtime ## Run validation, sanity, rubric, and runtime evals

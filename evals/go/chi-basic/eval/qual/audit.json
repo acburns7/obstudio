@@ -21,9 +21,10 @@
     "Identifies main.go as the entry point.",
     "Enumerates the HTTP routes: GET /health, GET /tasks, GET /tasks/{id}, POST /tasks, PATCH /tasks/{id}, DELETE /tasks/{id}.",
     "Reports no OTel SDK initialization and no go.opentelemetry.io dependencies.",
+    "Classifies traces, metrics, and logs independently for the real Go service startup path as no provider, treats those source-derived classifications as non-runtime proof, and inventories exact signal integrations rather than grouping them as generic HTTP or runtime telemetry.",
     "Calls out missing HTTP server spans, request duration, request rate, error visibility, and OTLP exporter wiring.",
     "Mentions otelhttp or otelchi as the appropriate Go HTTP instrumentation path.",
-    "Writes schema-v2 .observe/otel-audit.json with stable selectable finding IDs and complete downstream instrumentation context; renders a self-contained, decision-first .observe/otel.html with finding selection, copyable instrumentation handoff, and collapsed technical details while retaining complete machine context in canonical JSON.",
+    "Writes schema-v2 .observe/otel-audit.json with stable selectable finding IDs, reusable source-backed verification environments, and finding-mapped scenarios that cite existing entry points, exact expected telemetry, and the required proof level without executing runtime verification during the audit; renders a self-contained, decision-first .observe/otel.html while retaining that machine context only in canonical JSON.",
     "Renders .observe/otel.html as a decision-first findings view with GenAI ownership detected as No and a matching Audit Evidence row, while preserving machine context in canonical .observe/otel-audit.json and not rendering separate Incident or GenAI readiness ledger sections.",
     "The final response contains exactly one line: Review report: [otel.html](http://127.0.0.1:<port>/<token>/otel.html), using the loopback-only URL returned by finalize-audit. It does not open the browser automatically and does not include a machine-report link, summary bullets, finding counts, recommendations, or artifact-write narration."
   ]
